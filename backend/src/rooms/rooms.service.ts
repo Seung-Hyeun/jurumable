@@ -42,6 +42,9 @@ const MISSION_FIELDS = {
 const PENALTY_FIELDS = MISSION_FIELDS;
 // How many game history records room:state carries (newest first).
 const HISTORY_LIMIT = 20;
+// The Q&A snapshot of a question asked live by a player or a viewer ("직접 질문할게요"); such a
+// Q&A has no activeQuestionId.
+const DIRECT_QUESTION = '직접 질문';
 
 export function missionEndsAt(startedAt: Date, durationSeconds: number) {
   return new Date(startedAt.getTime() + durationSeconds * 1000);
@@ -402,6 +405,8 @@ export class RoomsService {
         ? {
             type: 'QA' as const,
             question: { id: activeQuestionId, content: activeQuestionContent },
+            // Asked live by a player or a viewer instead of picked from the list.
+            ...(activeQuestionId === null ? { direct: true as const } : {}),
           }
         : (missionEvent ?? targetEvent ?? qaSelectingEvent));
     // The game is paused underneath; only how many have voted is shown, never YES/NO.
@@ -1007,6 +1012,14 @@ export class RoomsService {
           lastActivityAt: startedAt,
         },
       });
+      // The history record counts down from the same times as the mission screen.
+      await tx.gameHistory.updateMany({
+        where: { roomId, kind: 'MISSION', status: 'IN_PROGRESS' },
+        data: {
+          startedAt,
+          endsAt: missionEndsAt(startedAt, room.activeMissionDurationSeconds),
+        },
+      });
       return {
         ok: true as const,
         playerId: player.id,
@@ -1605,6 +1618,19 @@ export class RoomsService {
           activeMissionStartedAt: resumedMission?.startedAt,
         },
       });
+      if (resumedMission) {
+        // The mission's history record moves on by the pause as well.
+        await tx.gameHistory.updateMany({
+          where: { roomId, kind: 'MISSION', status: 'IN_PROGRESS' },
+          data: {
+            startedAt: resumedMission.startedAt,
+            endsAt: missionEndsAt(
+              resumedMission.startedAt,
+              resumedMission.durationSeconds,
+            ),
+          },
+        });
+      }
       return {
         ok: true as const,
         completed: true as const,
@@ -1660,12 +1686,15 @@ export class RoomsService {
   }
 
   // The current player settles the Q&A question: `questionId` picks one of the room's
-  // questions, null lets the server pick one at random from the current list. The room lock and
-  // the "no question yet" check make it happen once, whichever request comes first.
+  // questions, null lets the server pick one at random from the current list, and `direct`
+  // skips the list because a player or a viewer asks the question themselves (no Question row:
+  // activeQuestionId stays null). The room lock and the "no question yet" check make it happen
+  // once, whichever request comes first.
   async selectQuestion(
     roomId: string,
     playerId: string,
     questionId: string | null,
+    direct = false,
   ) {
     return this.prisma.$transaction(async (tx) => {
       if (await this.lockAndCheckPaused(tx, roomId)) {
@@ -1705,8 +1734,10 @@ export class RoomsService {
       ) {
         return { ok: false as const, code: 'QA_NOT_SELECTING' as const };
       }
-      let question: { id: string; content: string } | null;
-      if (questionId === null) {
+      let question: { id: string | null; content: string } | null;
+      if (direct) {
+        question = { id: null, content: DIRECT_QUESTION };
+      } else if (questionId === null) {
         const questions = await tx.question.findMany({
           where: { roomId },
           select: { id: true, content: true },
@@ -1747,7 +1778,8 @@ export class RoomsService {
         playerId: player.id,
         displayName: player.displayName,
         question,
-        random: questionId === null,
+        random: !direct && questionId === null,
+        direct,
       };
     });
   }

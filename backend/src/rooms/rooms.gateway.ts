@@ -95,8 +95,14 @@ const QA_ERRORS = {
   GAME_PAUSED,
 };
 
+// direct: no question from the list, a player or viewer asks it (question.id is null then).
 type QaSelectResult =
-  | { ok: true; question: { id: string; content: string }; random: boolean }
+  | {
+      ok: true;
+      question: { id: string | null; content: string };
+      random: boolean;
+      direct: boolean;
+    }
   | { ok: true; empty: true }
   | AckError;
 
@@ -586,9 +592,16 @@ export class RoomsGateway
     return this.selectQuestion(socket, null);
   }
 
+  // 직접 질문할게요: the current player skips the list; a player or a viewer asks the question.
+  @SubscribeMessage('game:qa-direct')
+  handleQaDirect(@ConnectedSocket() socket: Socket): Promise<QaSelectResult> {
+    return this.selectQuestion(socket, null, true);
+  }
+
   private async selectQuestion(
     socket: Socket,
     questionId: string | null,
+    direct = false,
   ): Promise<QaSelectResult> {
     const { playerId, roomId, roomCode } = socket.data as SocketData;
     try {
@@ -596,6 +609,7 @@ export class RoomsGateway
         roomId,
         playerId,
         questionId,
+        direct,
       );
       if (!result.ok) {
         return ackError(result.code, QA_SELECT_ERRORS[result.code]);
@@ -614,9 +628,11 @@ export class RoomsGateway
         ...who,
         question: result.question,
         random: result.random,
+        direct: result.direct,
       });
       await this.broadcastRoomState(roomCode);
-      return { ok: true, question: result.question, random: result.random };
+      const { question, random } = result;
+      return { ok: true, question, random, direct: result.direct };
     } catch (error) {
       this.logger.error('Failed to select Q&A question', errorTrace(error));
       return ackError('INTERNAL_ERROR', 'Could not select the question');

@@ -70,8 +70,9 @@ export type PenaltySource = "TILE" | "MISSION_FAILURE";
 // its penalty arrives as PENALTY with source MISSION_FAILURE and that mission's snapshot.
 // QA_SELECTING: the current player is on a QA tile and the question is not chosen yet (they
 // pick one, or ask the server for a random one); QA follows once it is.
+// A QA with direct: true has no question from the list: a player or a viewer asks it live.
 export type ActiveEvent =
-  | { type: "QA"; question: { content: string } }
+  | { type: "QA"; question: { content: string }; direct?: true }
   | { type: "QA_SELECTING"; playerId: string; displayName: string }
   | {
       type: "MISSION";
@@ -154,12 +155,14 @@ export interface TileResolved {
   effect: TileEffect;
 }
 
-// `game:qa-selected`: the question the current player chose (random: the server picked it).
+// `game:qa-selected`: the question the current player chose (random: the server picked it;
+// direct: none from the list, it is asked live).
 export interface QaSelected {
   playerId: string;
   displayName: string;
-  question: { id: string; content: string };
+  question: { id: string | null; content: string };
   random: boolean;
+  direct: boolean;
 }
 
 // `game:qa-completed` payload.
@@ -257,9 +260,10 @@ export type QaCompleteAck =
   | { ok: true }
   | { ok: false; code: string; message: string };
 
-// `game:qa-select` / `game:qa-random`; empty: every question was gone, so the tile was skipped.
+// `game:qa-select` / `game:qa-random` / `game:qa-direct`; empty: every question was gone, so the
+// tile was skipped.
 export type QaSelectAck =
-  | { ok: true; question: { id: string; content: string }; random: boolean }
+  | { ok: true; question: { id: string | null; content: string }; random: boolean; direct: boolean }
   | { ok: true; empty: true }
   | { ok: false; code: string; message: string };
 

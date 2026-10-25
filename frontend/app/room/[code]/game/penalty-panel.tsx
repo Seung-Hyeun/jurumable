@@ -27,6 +27,47 @@ function Wheel() {
   );
 }
 
+// The roulette landing on the server's result, the same on every screen. The penalties flicking
+// by are the room's list in order, for show only: the last frame is always the result the server
+// already picked (and stored); nothing here chooses anything.
+export function rouletteFrames(candidates: string[], result: string, count: number) {
+  const list = candidates.length > 0 ? candidates : [result];
+  const at = Math.max(0, list.indexOf(result));
+  return Array.from({ length: count }, (_, i) =>
+    i === count - 1 ? result : list[(at - (count - 1 - i) + list.length * count) % list.length],
+  );
+}
+
+export function PenaltyRoulette({
+  performerName,
+  label,
+  frame,
+  stopped,
+}: {
+  performerName: string;
+  label: string;
+  frame: string;
+  stopped: boolean;
+}) {
+  return (
+    <section aria-labelledby="roulette-title" className="flex w-full flex-col items-center gap-3">
+      <EventHeader id="roulette-title" tone="danger" icon="🎡" label="벌칙 룰렛">
+        {performerName}님의 벌칙
+      </EventHeader>
+      <p className="text-sm font-bold text-zinc-600 dark:text-zinc-400">{label}</p>
+      <div
+        aria-hidden={!stopped}
+        className={`flex min-h-24 w-full max-w-xs items-center justify-center rounded-2xl px-4 py-3 text-center font-black whitespace-pre-wrap wrap-anywhere ring-2 ${stopped ? "bg-rose-50 dark:bg-rose-500/10 text-rose-800 dark:text-rose-200 ring-rose-300 dark:ring-rose-400/50" : "bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 ring-zinc-200 dark:ring-zinc-700"}`}
+      >
+        {frame}
+      </div>
+      <p className="font-semibold text-violet-700 dark:text-violet-300">
+        {stopped ? "벌칙이 정해졌습니다!" : "룰렛이 돌아가는 중..."}
+      </p>
+    </section>
+  );
+}
+
 // TILE and MISSION_FAILURE share this screen; only the source line (and the failed mission's
 // snapshot, when the backend sends it) differ.
 export function PenaltyPrompt({

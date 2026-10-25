@@ -1,7 +1,7 @@
 import { useRef, useState, type RefObject } from "react";
 import type { Socket } from "socket.io-client";
 import type { QaCompleteAck, QaSelectAck, Question, RoomClient, RoomStatePlayer } from "@/lib/api";
-import { FormError, cardClass, primaryButton } from "../../../_components/page-shell";
+import { FormError, cardClass, primaryButton, secondaryButton } from "../../../_components/page-shell";
 import { ContentPanel, type ContentItem } from "../content-panel";
 import { CALLOUT, EVENT_CONTENT, EventHeader, contentSize } from "./event-ui";
 
@@ -20,20 +20,21 @@ const QA_SELECT_ERRORS: Record<string, string> = {
   GAME_NOT_PLAYING: "게임이 진행 중이 아닙니다.",
 };
 
-// Sends the current player's choice: a question id, or null for the server's random pick. The
-// server takes only the first choice; the Q&A itself then arrives in room:state.
+// Sends the current player's choice: a question id, "random" for the server's pick, or "direct"
+// when a player or a viewer asks the question live. The server takes only the first choice; the
+// Q&A itself then arrives in room:state.
 function useQaChoice(socketRef: RefObject<Socket | null>) {
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const busy = useRef(false);
 
-  function choose(questionId: string | null) {
+  function choose(choice: string) {
     const socket = socketRef.current;
     if (!socket || busy.current) {
       return;
     }
     busy.current = true;
-    setPending(questionId ?? "random");
+    setPending(choice);
     setError(null);
     const done = (failure: Error | null, ack: QaSelectAck) => {
       busy.current = false;
@@ -44,10 +45,12 @@ function useQaChoice(socketRef: RefObject<Socket | null>) {
         setError(QA_SELECT_ERRORS[ack.code] ?? "질문을 정하지 못했습니다.");
       }
     };
-    if (questionId === null) {
+    if (choice === "random") {
       socket.timeout(5000).emit("game:qa-random", {}, done);
+    } else if (choice === "direct") {
+      socket.timeout(5000).emit("game:qa-direct", {}, done);
     } else {
-      socket.timeout(5000).emit("game:qa-select", { questionId }, done);
+      socket.timeout(5000).emit("game:qa-select", { questionId: choice }, done);
     }
   }
 
@@ -72,11 +75,11 @@ export function QaSelectPrompt({
       </EventHeader>
       <p className="font-semibold text-violet-700 dark:text-violet-300">
         {isPerformer
-          ? "아래 목록에서 질문을 고르거나, 랜덤으로 정하세요."
+          ? "아래 목록에서 질문을 고르거나 랜덤으로 결정하세요."
           : `${performer.displayName}님이 질문을 고르는 중입니다.`}
       </p>
       <p className="text-sm text-zinc-600 dark:text-zinc-400">
-        다른 참가자나 시청자가 낸 질문도 목록에 추가해서 고를 수 있습니다.
+        참가자나 시청자가 직접 질문할 수도 있습니다.
       </p>
       {paused && <p className={CALLOUT}>게임 종료 투표가 진행 중입니다.</p>}
       {!performer.isOnline && (
@@ -86,8 +89,9 @@ export function QaSelectPrompt({
   );
 }
 
-// Only the current player gets this: the server picks one of the room's questions at random.
-export function QaRandomButton({
+// Only the current player gets these: the server picks one of the room's questions at random,
+// or the list is skipped because a player or a viewer asks the question live.
+export function QaChoiceButtons({
   socketRef,
   connected,
   paused,
@@ -97,16 +101,26 @@ export function QaRandomButton({
   paused: boolean;
 }) {
   const { choose, pending, error } = useQaChoice(socketRef);
+  const disabled = !connected || paused || pending !== null;
   return (
     <div className="flex w-full max-w-xs flex-col gap-2">
       <button
         type="button"
-        onClick={() => choose(null)}
-        disabled={!connected || paused || pending !== null}
+        onClick={() => choose("random")}
+        disabled={disabled}
         aria-describedby="qa-random-hint"
         className={primaryButton}
       >
-        {pending ? "정하는 중..." : "랜덤으로 결정"}
+        {pending === "random" ? "정하는 중..." : "랜덤으로 결정"}
+      </button>
+      <button
+        type="button"
+        onClick={() => choose("direct")}
+        disabled={disabled}
+        aria-describedby="qa-direct-hint"
+        className={secondaryButton}
+      >
+        {pending === "direct" ? "넘어가는 중..." : "직접 질문할게요"}
       </button>
       <p id="qa-random-hint" className="text-sm text-zinc-600 dark:text-zinc-400">
         {paused
@@ -114,6 +128,9 @@ export function QaRandomButton({
           : !connected
             ? "서버와 다시 연결되면 고를 수 있습니다."
             : "질문을 정하지 못했다면 서버가 목록에서 하나를 뽑습니다."}
+      </p>
+      <p id="qa-direct-hint" className="text-sm text-zinc-600 dark:text-zinc-400">
+        다른 참가자나 시청자가 직접 질문할 경우 이 단계를 넘어갈 수 있습니다.
       </p>
       <FormError message={error} />
     </div>
@@ -185,26 +202,39 @@ export function QaQuestionPicker({
 }
 
 // The question is the snapshot from room:state, so a refresh shows the same one and edits to
-// the original question (or deleting it) do not change it.
+// the original question (or deleting it) do not change it. direct: no question from the list;
+// a player or a viewer asks it live, and the answer ends the same way (답변 완료).
 export function QaPrompt({
   question,
+  direct,
   performer,
   isPerformer,
   paused,
 }: {
   question: string;
+  direct: boolean;
   performer: RoomStatePlayer;
   isPerformer: boolean;
   paused: boolean;
 }) {
   return (
     <section aria-labelledby="qa-title" className="flex w-full flex-col items-center gap-3">
-      <EventHeader id="qa-title" tone="primary" icon="❓" label="Q&A">
+      <EventHeader id="qa-title" tone="primary" icon="❓" label={direct ? "Q&A · 직접 질문" : "Q&A"}>
         {performer.displayName}님의 질문
       </EventHeader>
-      <p className={`${EVENT_CONTENT} ${contentSize(question)}`}>“{question}”</p>
+      {direct ? (
+        <p className={`${EVENT_CONTENT} text-xl`}>직접 질문 진행 중</p>
+      ) : (
+        <p className={`${EVENT_CONTENT} ${contentSize(question)}`}>“{question}”</p>
+      )}
       <p className="font-semibold text-violet-700 dark:text-violet-300">
-        {isPerformer ? "내 질문입니다." : `${performer.displayName}님의 답변을 기다리는 중...`}
+        {direct
+          ? isPerformer
+            ? "참가자나 시청자의 질문에 답한 뒤 답변 완료를 누르세요."
+            : `참가자나 시청자가 질문하고 ${performer.displayName}님이 답합니다.`
+          : isPerformer
+            ? "내 질문입니다."
+            : `${performer.displayName}님의 답변을 기다리는 중...`}
       </p>
       {paused && <p className={CALLOUT}>게임 종료 투표가 진행 중입니다.</p>}
       {!performer.isOnline && (

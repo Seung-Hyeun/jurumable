@@ -10,6 +10,7 @@ import type {
   MissionFinished,
   MissionStarted,
   MissionVoteResult,
+  Penalty,
   PenaltyResult,
   PenaltyStarted,
   QaCompleted,
@@ -51,14 +52,14 @@ import { useRoom } from "../use-room";
 import { EndVoteOverlay, GameEnded } from "./end-vote-panel";
 import { CALLOUT, contentSize } from "./event-ui";
 import { Die, GameBoard, PlayerToken } from "./game-board";
-import { HistoryPanel } from "./history-panel";
+import { HistoryPanel, type RollLogEntry } from "./history-panel";
 import { MissionAction, MissionPrompt, MissionVote } from "./mission-panel";
-import { PenaltyPrompt, PenaltySpin } from "./penalty-panel";
+import { PenaltyPrompt, PenaltyRoulette, PenaltySpin, rouletteFrames } from "./penalty-panel";
 import {
+  QaChoiceButtons,
   QaCompleteButton,
   QaPrompt,
   QaQuestionPicker,
-  QaRandomButton,
   QaSelectPrompt,
 } from "./qa-panel";
 import { TargetChoices, TargetPrompt } from "./target-panel";
@@ -116,6 +117,7 @@ type ShownRoll = DiceRolled & { seq: number };
 // rolling and tiles walked while moving.
 type RollShow = {
   roll: DiceRolled;
+  seq: number;
   phase: "rolling" | "reveal" | "moving" | "arrived";
   tick: number;
   base: RoomStatePayload | null;
@@ -161,9 +163,10 @@ function shownPosition({ roll, phase, tick }: RollShow) {
   return phase === "moving" ? (roll.fromPosition + tick) % BOARD_SIZE : roll.toPosition;
 }
 
-// The latest state as it is drawn during a roll: the turn, the turn phase and the roller's drinks
-// from before it, the roller's token where the walk has got to, and no event yet. Everything
-// else (presence, host, an end-game vote, the history) is the latest.
+// The latest state as it is drawn during a roll: the turn, the turn phase, the roller's drinks
+// and the mission / penalty history from before it (a mission picked on landing must not show up
+// there first), the roller's token where the walk has got to, and no event yet. Everything else
+// (presence, host, an end-game vote) is the latest.
 function duringShow(show: RollShow, state: RoomStatePayload): RoomStatePayload {
   const base = show.base ?? state;
   const before = base.players.find((player) => player.id === show.roll.playerId);
@@ -181,6 +184,28 @@ function duringShow(show: RollShow, state: RoomStatePayload): RoomStatePayload {
         : player,
     ),
     activeEvent: null,
+    history: base.history,
+  };
+}
+
+// The penalty roulette: penalties flick by, slowing down, and stop on the server's result
+// (already picked and stored; the turn has already moved on). Like a roll it holds back the turn
+// and the history until it has stopped, and plays only with motion allowed.
+type SpinShow = { result: PenaltyResult; tick: number; base: RoomStatePayload | null };
+const SPIN_FRAMES = 13;
+const spinDelay = (tick: number) => (tick === SPIN_FRAMES - 1 ? 700 : 50 + tick * 13); // ~1.7 s, then the result
+
+function duringSpin(spin: SpinShow, state: RoomStatePayload): RoomStatePayload {
+  const base = spin.base ?? state;
+  return {
+    ...state,
+    room: {
+      ...state.room,
+      currentTurnOrder: base.room.currentTurnOrder,
+      turnPhase: base.room.turnPhase,
+    },
+    activeEvent: null,
+    history: base.history,
   };
 }
 
@@ -251,8 +276,15 @@ export default function GameScreen({ code }: { code: string }) {
   const [questionsFailed, setQuestionsFailed] = useState(false);
   // Bumped whenever the list changes from the socket or an edit, so an older GET cannot win.
   const questionsVersion = useRef(0);
+  // The room's penalties: what the roulette flicks through before it stops on the result.
+  const [penalties, setPenalties] = useState<Penalty[]>([]);
   // The roll being shown (see RollShow); null when nothing is held back.
   const [show, setShow] = useState<RollShow | null>(null);
+  // The penalty roulette being shown (see SpinShow).
+  const [spin, setSpin] = useState<SpinShow | null>(null);
+  // 게임 기록: the latest rolls this screen has seen, newest first (not stored by the backend).
+  const [log, setLog] = useState<RollLogEntry[]>([]);
+  const rollSeq = useRef(0);
   // The state last drawn, so a roll can start from how things were just before it.
   const latest = useRef<RoomStatePayload | null>(null);
 
@@ -274,34 +306,63 @@ export default function GameScreen({ code }: { code: string }) {
       });
     };
     // Rolls broadcast while this socket was away are not replayed, so an old one is dropped
-    // (and never shown again); updates to the questions are not replayed either.
+    // (and never shown again); updates to the questions / penalties are not replayed either.
     s.on("connect", () => {
       setLastRoll(null);
       setShow(null);
+      setSpin(null);
       setNotice(null);
       setLiveVote(null);
       setLiveEndVote(null);
       setEndRound((round) => round + 1);
       loadQuestions();
+      void client.list("penalties").then((result) => {
+        if (!isCancelled() && result.ok) {
+          setPenalties(result.data);
+        }
+      });
     });
     s.on("questions:updated", (payload: { questions: Question[] }) => {
       questionsVersion.current += 1;
       setQuestions(payload.questions);
     });
+    s.on("penalties:updated", (payload: { penalties: Penalty[] }) => setPenalties(payload.penalties));
     // Transient display only: the result and positions always come from the latest room:state.
     // The show starts from the state drawn so far, which is still the one before this roll.
     s.on("game:dice-rolled", (payload: DiceRolled) => {
-      setLastRoll((previous) => ({ ...payload, seq: (previous?.seq ?? 0) + 1 }));
+      rollSeq.current += 1;
+      const seq = rollSeq.current;
+      setLastRoll({ ...payload, seq });
+      setLog((list) =>
+        [
+          {
+            seq,
+            playerId: payload.playerId,
+            displayName: payload.displayName,
+            dice: payload.dice,
+            fromPosition: payload.fromPosition,
+            toPosition: payload.toPosition,
+            tile: payload.tile.type,
+          },
+          ...list,
+        ].slice(0, 20),
+      );
       setNotice(null);
+      setSpin(null);
       setShow(
         motionAllowed()
-          ? { roll: payload, phase: "rolling", tick: 0, base: latest.current }
+          ? { roll: payload, seq, phase: "rolling", tick: 0, base: latest.current }
           : null,
       );
     });
-    s.on("game:tile-resolved", (payload: TileResolved) =>
-      setNotice({ text: effectMessage(payload) }),
-    );
+    s.on("game:tile-resolved", (payload: TileResolved) => {
+      setNotice({ text: effectMessage(payload) });
+      setLog((list) =>
+        list.map((entry) =>
+          entry.seq === rollSeq.current ? { ...entry, result: effectMessage(payload) } : entry,
+        ),
+      );
+    });
     // The Q&A, 지목 and mission screens come from room:state.activeEvent (also after a
     // refresh), so these start signals only clear the previous message.
     s.on("game:qa", () => setNotice(null));
@@ -335,12 +396,19 @@ export default function GameScreen({ code }: { code: string }) {
     s.on("game:qa-completed", (payload: QaCompleted) =>
       setNotice({ text: `${payload.displayName}님의 Q&A가 완료되었습니다.` }),
     );
-    s.on("game:target-selected", ({ sourcePlayer, targetPlayer }: TargetSelected) =>
+    s.on("game:target-selected", ({ sourcePlayer, targetPlayer }: TargetSelected) => {
       setNotice({
         text: `${sourcePlayer.displayName}님이 ${targetPlayer.displayName}님을 지목했습니다! ${targetPlayer.displayName}님 한 잔!`,
         targetId: targetPlayer.id,
-      }),
-    );
+      });
+      setLog((list) =>
+        list.map((entry, i) =>
+          i === 0 && entry.playerId === sourcePlayer.id
+            ? { ...entry, result: `👉 ${targetPlayer.displayName}님 지목, 한 잔!` }
+            : entry,
+        ),
+      );
+    });
     s.on("game:qa-empty", () => setNotice({ text: SKIPPED.qa }));
     s.on("game:mission-empty", () => setNotice({ text: SKIPPED.mission }));
     s.on("game:penalty-empty", (payload: PenaltyStarted) =>
@@ -350,8 +418,10 @@ export default function GameScreen({ code }: { code: string }) {
           : { text: SKIPPED.penalty },
       ),
     );
-    // The server's pick, the same on every screen; it stays up after the turn moves on.
-    s.on("game:penalty-result", ({ displayName, source, penalty }: PenaltyResult) =>
+    // The server's pick, the same on every screen; it stays up after the turn moves on. With
+    // motion allowed the roulette plays first and stops on it.
+    s.on("game:penalty-result", (payload: PenaltyResult) => {
+      const { displayName, source, penalty } = payload;
       setNotice({
         text: `${displayName ?? ""}님의 벌칙`,
         penalty: {
@@ -359,8 +429,9 @@ export default function GameScreen({ code }: { code: string }) {
           content: penalty.content,
           durationSeconds: penalty.durationSeconds,
         },
-      }),
-    );
+      });
+      setSpin(motionAllowed() ? { result: payload, tick: 0, base: latest.current } : null);
+    });
     s.on("game:target-empty", () => setNotice({ text: SKIPPED.target }));
     // Only voted / total while the end-game vote runs. Only the request sends voted 0, so that
     // marks a new vote.
@@ -414,6 +485,21 @@ export default function GameScreen({ code }: { code: string }) {
     );
     return () => window.clearTimeout(timer);
   }, [show]);
+
+  // The roulette slows down frame by frame, holds the result a moment, then lets the game on.
+  useEffect(() => {
+    if (!spin) {
+      return;
+    }
+    const timer = window.setTimeout(
+      () =>
+        setSpin((current) =>
+          current && current.tick + 1 < SPIN_FRAMES ? { ...current, tick: current.tick + 1 } : null,
+        ),
+      spinDelay(spin.tick),
+    );
+    return () => window.clearTimeout(timer);
+  }, [spin]);
 
   function roll() {
     const socket = socketRef.current;
@@ -521,7 +607,7 @@ export default function GameScreen({ code }: { code: string }) {
   }
 
   // What is drawn: the latest state, held back where a roll is still being shown.
-  const shown = show ? duringShow(show, state) : state;
+  const shown = show ? duringShow(show, state) : spin ? duringSpin(spin, state) : state;
   const { room, activeEvent, endVote, history } = shown;
   const last = shown.players.length;
   const players = [...shown.players].sort(
@@ -550,7 +636,8 @@ export default function GameScreen({ code }: { code: string }) {
     !paused &&
     connection === "connected" &&
     !rolling &&
-    !show;
+    !show &&
+    !spin;
   // The QA tile before its question is chosen (from room:state only).
   const qaSelecting =
     room.status === "PLAYING" &&
@@ -717,7 +804,20 @@ export default function GameScreen({ code }: { code: string }) {
                       </p>
                     )}
                   </div>
-                ) : qaSelecting && qaSelectingPerformer ? (
+                ) : spin ? (
+                <PenaltyRoulette
+                  performerName={spin.result.displayName ?? ""}
+                  label={spin.result.source === "MISSION_FAILURE" ? "미션 실패 벌칙" : "벌칙 칸 결과"}
+                  frame={
+                    rouletteFrames(
+                      penalties.map((penalty) => penalty.content),
+                      spin.result.penalty.content,
+                      SPIN_FRAMES,
+                    )[spin.tick]
+                  }
+                  stopped={spin.tick === SPIN_FRAMES - 1}
+                />
+              ) : qaSelecting && qaSelectingPerformer ? (
                   <QaSelectPrompt
                     performer={qaSelectingPerformer}
                     isPerformer={qaSelecting.playerId === view.playerId}
@@ -726,6 +826,7 @@ export default function GameScreen({ code }: { code: string }) {
                 ) : qa && current ? (
                   <QaPrompt
                     question={qa.content}
+                    direct={activeEvent?.type === "QA" && activeEvent.direct === true}
                     performer={current}
                     isPerformer={isMyTurn}
                     paused={paused}
@@ -847,10 +948,10 @@ export default function GameScreen({ code }: { code: string }) {
                   </>
                 )}
               </div>
-              {show ? null : qaSelecting ? (
+              {show || spin ? null : qaSelecting ? (
                 // Only the current player decides; everyone may still add questions to the list.
                 qaSelecting.playerId === view.playerId && (
-                  <QaRandomButton
+                  <QaChoiceButtons
                     socketRef={socketRef}
                     connected={connection === "connected"}
                     paused={paused}
@@ -943,8 +1044,11 @@ export default function GameScreen({ code }: { code: string }) {
 
         <HistoryPanel
           entries={history}
+          // The roll still being shown stays out of 게임 기록 until it has landed.
+          log={show ? log.filter((entry) => entry.seq !== show.seq) : log}
           serverOffset={serverOffset}
           myId={view.playerId}
+          paused={paused}
           className="lg:col-start-1 lg:row-start-2 xl:sticky xl:top-4 xl:col-start-1 xl:row-start-1"
         />
 
