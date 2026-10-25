@@ -13,14 +13,15 @@ export function contentError(content: string) {
   return null;
 }
 
-// TIMED missions need a whole number of seconds, at least 1 (no upper limit in the backend).
-export function durationError(value: string) {
+// TIMED missions and penalties need a whole number of seconds, at least 1 (no upper limit in
+// the backend). label names the field: 제한 시간 for a mission, 지속 시간 for a penalty.
+export function durationError(value: string, label = "제한 시간") {
   if (!value.trim()) {
-    return "제한 시간(초)을 입력해주세요.";
+    return `${label}(초)을 입력해주세요.`;
   }
   const seconds = Number(value);
   if (!Number.isInteger(seconds) || seconds < 1) {
-    return "제한 시간은 1 이상의 정수(초)로 입력해주세요.";
+    return `${label}은 1 이상의 정수(초)로 입력해주세요.`;
   }
   return null;
 }

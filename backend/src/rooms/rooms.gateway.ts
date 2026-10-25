@@ -95,6 +95,19 @@ const QA_ERRORS = {
   GAME_PAUSED,
 };
 
+type QaSelectResult =
+  | { ok: true; question: { id: string; content: string }; random: boolean }
+  | { ok: true; empty: true }
+  | AckError;
+
+const QA_SELECT_ERRORS = {
+  GAME_NOT_PLAYING: 'The game is not in progress',
+  NOT_YOUR_TURN: 'It is not your turn',
+  QA_NOT_SELECTING: 'No Q&A question is being chosen',
+  QUESTION_NOT_FOUND: 'Question not found',
+  GAME_PAUSED,
+};
+
 type VoteResult =
   | { ok: true; completed: false; voted: number; total: number }
   | { ok: true; completed: true; result: string; o: number; x: number }
@@ -112,7 +125,15 @@ type SpinResult =
   | {
       ok: true;
       source: string;
-      penalty: { id: string; content: string };
+      // startedAt / endsAt only for a timed penalty, which runs on alongside the game.
+      penalty: {
+        id: string;
+        content: string;
+        type: string;
+        durationSeconds: number | null;
+        startedAt: string | null;
+        endsAt: string | null;
+      };
     }
   | { ok: true; empty: true }
   | AckError;
@@ -453,7 +474,7 @@ export class RoomsGateway
       if (!result.ok) {
         return ackError(result.code, ROLL_ERRORS[result.code]);
       }
-      const { playerId: rollerId, displayName, question, qaEmpty } = result;
+      const { playerId: rollerId, displayName, qaReady, qaEmpty } = result;
       const { mission, missionEmpty, penaltyReady, penaltyEmpty } = result;
       const { dice, fromPosition, toPosition, tile, effect } = result;
       const broadcast = this.server.to(roomChannel(roomCode));
@@ -472,12 +493,9 @@ export class RoomsGateway
           tile,
           effect,
         });
-      } else if (question) {
-        broadcast.emit('game:qa', {
-          playerId: rollerId,
-          displayName,
-          question,
-        });
+      } else if (qaReady) {
+        // The question selection opens; game:qa-selected follows with the question.
+        broadcast.emit('game:qa', { playerId: rollerId, displayName });
       } else if (qaEmpty) {
         broadcast.emit('game:qa-empty', { playerId: rollerId, displayName });
       } else if (mission) {
@@ -540,6 +558,68 @@ export class RoomsGateway
     } catch (error) {
       this.logger.error('Failed to roll dice', errorTrace(error));
       return ackError('INTERNAL_ERROR', 'Could not roll the dice');
+    }
+  }
+
+  // The current player picks one of the room's questions for their Q&A.
+  @SubscribeMessage('game:qa-select')
+  handleQaSelect(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() body: unknown,
+  ): Promise<QaSelectResult> {
+    const questionId = (body as { questionId?: unknown } | null)?.questionId;
+    if (
+      typeof questionId !== 'string' ||
+      questionId.length === 0 ||
+      questionId.length > 100
+    ) {
+      return Promise.resolve(
+        ackError('BAD_REQUEST', 'questionId must be a question id'),
+      );
+    }
+    return this.selectQuestion(socket, questionId);
+  }
+
+  // The current player lets the server pick the Q&A question at random.
+  @SubscribeMessage('game:qa-random')
+  handleQaRandom(@ConnectedSocket() socket: Socket): Promise<QaSelectResult> {
+    return this.selectQuestion(socket, null);
+  }
+
+  private async selectQuestion(
+    socket: Socket,
+    questionId: string | null,
+  ): Promise<QaSelectResult> {
+    const { playerId, roomId, roomCode } = socket.data as SocketData;
+    try {
+      const result = await this.roomsService.selectQuestion(
+        roomId,
+        playerId,
+        questionId,
+      );
+      if (!result.ok) {
+        return ackError(result.code, QA_SELECT_ERRORS[result.code]);
+      }
+      const broadcast = this.server.to(roomChannel(roomCode));
+      const who = {
+        playerId: result.playerId,
+        displayName: result.displayName,
+      };
+      if (result.empty) {
+        broadcast.emit('game:qa-empty', who);
+        await this.broadcastRoomState(roomCode);
+        return { ok: true, empty: true };
+      }
+      broadcast.emit('game:qa-selected', {
+        ...who,
+        question: result.question,
+        random: result.random,
+      });
+      await this.broadcastRoomState(roomCode);
+      return { ok: true, question: result.question, random: result.random };
+    } catch (error) {
+      this.logger.error('Failed to select Q&A question', errorTrace(error));
+      return ackError('INTERNAL_ERROR', 'Could not select the question');
     }
   }
 
@@ -1086,6 +1166,8 @@ export class RoomsGateway
               }
             : activeEvent,
         endVote: state.endVote,
+        history: state.history,
+        serverTime: state.serverTime,
       });
     } catch (error) {
       this.logger.error('Failed to broadcast room state', errorTrace(error));

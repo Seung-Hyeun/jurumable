@@ -64,20 +64,29 @@ export function OnlineBadge({ online }: { online: boolean }) {
   );
 }
 
-// The same NORMAL / TIMED badge in the lobby's mission list and on the mission screen.
+// What NORMAL / TIMED are called for each kind of content.
+export const TYPE_LABEL = {
+  mission: { NORMAL: "일반", TIMED: "시간제" },
+  penalty: { NORMAL: "즉시형", TIMED: "시간형" },
+} as const;
+
+// The same NORMAL / TIMED badge in the lobby's mission / penalty lists and on the mission screen.
 export function MissionTypeBadge({
   type,
   durationSeconds,
+  kind = "mission",
 }: {
   type: MissionType;
   durationSeconds: number | null;
+  kind?: keyof typeof TYPE_LABEL;
 }) {
   if (type === "TIMED" && durationSeconds) {
     return (
       <Badge tone="info">
-        <span aria-hidden="true">⏱ </span>시간제 · {formatDuration(durationSeconds)}
+        <span aria-hidden="true">⏱ </span>
+        {TYPE_LABEL[kind].TIMED} · {formatDuration(durationSeconds)}
       </Badge>
     );
   }
-  return <Badge>일반</Badge>;
+  return <Badge>{TYPE_LABEL[kind].NORMAL}</Badge>;
 }

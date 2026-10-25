@@ -1,4 +1,4 @@
-import type { MissionType } from '../generated/prisma/client.js';
+import type { MissionType, PenaltyType } from '../generated/prisma/client.js';
 
 // What every new room starts with, written as that room's own Question / Mission / Penalty rows
 // when the room is created (and only then). Players edit or delete them like anything they add;
@@ -124,20 +124,82 @@ export const DEFAULT_MISSIONS: readonly {
   },
 ];
 
-export const DEFAULT_PENALTIES: readonly string[] = [
-  '다음 내 차례까지 존댓말만 사용하기',
-  '다음 내 차례까지 말 끝마다 냥 붙이기',
-  '10초 동안 벌칙 세리머니 하기',
-  '가장 자신 있는 춤 5초 보여주기',
-  '애교 한마디 하기',
-  '영화 주인공처럼 자기소개하기',
-  '옆 사람에게 즉석 칭찬 3개 하기',
-  '다음 한 문장을 랩으로 말하기',
-  '카메라를 향해 엔딩 포즈 하기',
-  '아무 동물 성대모사 하기',
-  '5초 동안 슬로모션 연기하기',
-  '랜덤 포즈 3개 연속 보여주기',
-  '뉴스 앵커 톤으로 현재 상황 설명하기',
-  '다음 내 차례까지 별명으로만 불리기',
-  '손하트 3종 세트 보여주기',
+// TIMED penalties run for their seconds alongside the game (see GameHistory); NORMAL ones are
+// done on the spot.
+export const DEFAULT_PENALTIES: readonly {
+  content: string;
+  type: PenaltyType;
+  durationSeconds: number | null;
+}[] = [
+  {
+    content: '5분 동안 말 끝마다 "냥" 붙이기',
+    type: 'TIMED',
+    durationSeconds: 300,
+  },
+  {
+    content: '3분 동안 모든 사람에게 존댓말만 사용하기',
+    type: 'TIMED',
+    durationSeconds: 180,
+  },
+  {
+    content: '3분 동안 자신을 3인칭으로 부르기',
+    type: 'TIMED',
+    durationSeconds: 180,
+  },
+  {
+    content: '5분 동안 다른 사람들이 정한 별명으로만 불리기',
+    type: 'TIMED',
+    durationSeconds: 300,
+  },
+  {
+    content: '2분 동안 질문을 받을 때마다 "그건 비밀입니다"로 시작하기',
+    type: 'TIMED',
+    durationSeconds: 120,
+  },
+  {
+    content: '3분 동안 모든 대답을 뉴스 앵커 톤으로 하기',
+    type: 'TIMED',
+    durationSeconds: 180,
+  },
+  {
+    content: '2분 동안 말할 때마다 손동작 하나씩 추가하기',
+    type: 'TIMED',
+    durationSeconds: 120,
+  },
+  {
+    content: '3분 동안 웃을 때마다 박수 한 번 치기',
+    type: 'TIMED',
+    durationSeconds: 180,
+  },
+  {
+    content: '5분 동안 특정 금지어 하나 정해서 사용하지 않기',
+    type: 'TIMED',
+    durationSeconds: 300,
+  },
+  {
+    content: '3분 동안 문장 끝마다 "인정?" 붙이기',
+    type: 'TIMED',
+    durationSeconds: 180,
+  },
+  {
+    content: '옆 사람에게 즉석 칭찬 3개 하기',
+    type: 'NORMAL',
+    durationSeconds: null,
+  },
+  { content: '아무 동물 성대모사 하기', type: 'NORMAL', durationSeconds: null },
+  {
+    content: '카메라를 향해 엔딩 포즈 3종 보여주기',
+    type: 'NORMAL',
+    durationSeconds: null,
+  },
+  {
+    content: '10초 동안 광고 모델 연기하기',
+    type: 'NORMAL',
+    durationSeconds: null,
+  },
+  {
+    content: '현재 상황을 뉴스 속보처럼 설명하기',
+    type: 'NORMAL',
+    durationSeconds: null,
+  },
 ];

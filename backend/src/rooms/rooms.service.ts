@@ -38,9 +38,23 @@ const MISSION_FIELDS = {
   type: true,
   durationSeconds: true,
 } as const;
+// Penalties carry the same type / duration pair as missions.
+const PENALTY_FIELDS = MISSION_FIELDS;
+// How many game history records room:state carries (newest first).
+const HISTORY_LIMIT = 20;
 
 export function missionEndsAt(startedAt: Date, durationSeconds: number) {
   return new Date(startedAt.getTime() + durationSeconds * 1000);
+}
+
+// A body without a type is a NORMAL penalty (what every client sent before timed penalties).
+function penaltyData(dto: SavePenaltyDto) {
+  const type = dto.type ?? 'NORMAL';
+  return {
+    content: dto.content,
+    type,
+    durationSeconds: type === 'TIMED' ? (dto.durationSeconds ?? null) : null,
+  };
 }
 
 // What removing a player needs to know about the room.
@@ -152,9 +166,9 @@ export class RoomsService {
             })),
           });
           await tx.penalty.createMany({
-            data: DEFAULT_PENALTIES.map((content, i) => ({
+            data: DEFAULT_PENALTIES.map((penalty, i) => ({
               roomId,
-              content,
+              ...penalty,
               createdAt: new Date(now + i),
             })),
           });
@@ -369,6 +383,19 @@ export class RoomsService {
             displayName: current.displayName,
           }
         : null;
+    // A QA tile waits for the current player to pick a question (or let the server pick one at
+    // random); like TARGET_DRINK, standing on the tile with no question yet is the signal.
+    const qaSelectingEvent =
+      roomInfo.turnPhase === 'RESOLVING_TILE' &&
+      current &&
+      getTile(current.position).type === TileType.QA &&
+      activeQuestionContent === null
+        ? {
+            type: 'QA_SELECTING' as const,
+            playerId: current.id,
+            displayName: current.displayName,
+          }
+        : null;
     const activeEvent =
       penaltyEvent ??
       (activeQuestionContent !== null
@@ -376,7 +403,7 @@ export class RoomsService {
             type: 'QA' as const,
             question: { id: activeQuestionId, content: activeQuestionContent },
           }
-        : (missionEvent ?? targetEvent));
+        : (missionEvent ?? targetEvent ?? qaSelectingEvent));
     // The game is paused underneath; only how many have voted is shown, never YES/NO.
     const endVote = activeEndVoteRoundId
       ? {
@@ -387,7 +414,41 @@ export class RoomsService {
           total: players.length,
         }
       : null;
-    return { room: roomInfo, players, activeEvent, endVote };
+    // The latest missions / penalties of this game; a timed penalty still running is the one
+    // whose endsAt is after serverTime (the clients count down from that).
+    const history = (
+      await this.prisma.gameHistory.findMany({
+        where: { roomId: roomInfo.id },
+        select: {
+          id: true,
+          playerId: true,
+          displayName: true,
+          kind: true,
+          content: true,
+          durationSeconds: true,
+          penaltySource: true,
+          status: true,
+          startedAt: true,
+          endsAt: true,
+          createdAt: true,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: HISTORY_LIMIT,
+      })
+    ).map((entry) => ({
+      ...entry,
+      startedAt: entry.startedAt?.toISOString() ?? null,
+      endsAt: entry.endsAt?.toISOString() ?? null,
+      createdAt: entry.createdAt.toISOString(),
+    }));
+    return {
+      room: roomInfo,
+      players,
+      activeEvent,
+      endVote,
+      history,
+      serverTime: new Date().toISOString(),
+    };
   }
 
   async listMissions(roomId: string) {
@@ -478,31 +539,28 @@ export class RoomsService {
   async listPenalties(roomId: string) {
     return this.prisma.penalty.findMany({
       where: { roomId },
-      select: { id: true, content: true },
+      select: PENALTY_FIELDS,
       orderBy: { createdAt: 'asc' },
     });
   }
 
-  async createPenalty(roomId: string, { content }: SavePenaltyDto) {
+  async createPenalty(roomId: string, dto: SavePenaltyDto) {
     return this.prisma.penalty.create({
-      data: { roomId, content },
-      select: { id: true, content: true },
+      data: { roomId, ...penaltyData(dto) },
+      select: PENALTY_FIELDS,
     });
   }
 
-  async updatePenalty(
-    roomId: string,
-    penaltyId: string,
-    { content }: SavePenaltyDto,
-  ) {
+  async updatePenalty(roomId: string, penaltyId: string, dto: SavePenaltyDto) {
+    const data = penaltyData(dto);
     const { count } = await this.prisma.penalty.updateMany({
       where: { id: penaltyId, roomId },
-      data: { content },
+      data,
     });
     if (count === 0) {
       throw new NotFoundException('Penalty not found');
     }
-    return { id: penaltyId, content };
+    return { id: penaltyId, ...data };
   }
 
   async deletePenalty(roomId: string, penaltyId: string) {
@@ -846,17 +904,11 @@ export class RoomsService {
         },
       });
 
-      let question: { id: string; content: string } | null = null;
-      if (tile.type === TileType.QA) {
-        const questions = await tx.question.findMany({
-          where: { roomId },
-          select: { id: true, content: true },
-          orderBy: { createdAt: 'asc' },
-        });
-        if (questions.length > 0) {
-          question = questions[randomInt(questions.length)];
-        }
-      }
+      // A QA tile only opens the question selection here; the question is picked by the
+      // current player (or at random on request) in selectQuestion.
+      const qaReady =
+        tile.type === TileType.QA &&
+        (await tx.question.count({ where: { roomId } })) > 0;
       let mission: {
         content: string;
         type: MissionType;
@@ -870,6 +922,18 @@ export class RoomsService {
         });
         if (missions.length > 0) {
           mission = missions[randomInt(missions.length)];
+          // In the same transaction as the pick: one record per assigned mission.
+          await tx.gameHistory.create({
+            data: {
+              roomId,
+              playerId: player.id,
+              displayName: player.displayName,
+              kind: 'MISSION',
+              content: mission.content,
+              durationSeconds: mission.durationSeconds,
+              status: 'IN_PROGRESS',
+            },
+          });
         }
       }
       // A PENALTY tile only waits for the roulette here; the penalty is picked on spin.
@@ -877,7 +941,7 @@ export class RoomsService {
         tile.type === TileType.PENALTY &&
         (await tx.penalty.count({ where: { roomId } })) > 0;
       // QA / MISSION / PENALTY tiles with nothing registered are skipped so the game never stalls.
-      const qaEmpty = tile.type === TileType.QA && !question;
+      const qaEmpty = tile.type === TileType.QA && !qaReady;
       const missionEmpty = tile.type === TileType.MISSION && !mission;
       const penaltyEmpty = tile.type === TileType.PENALTY && !penaltyReady;
 
@@ -888,8 +952,6 @@ export class RoomsService {
           where: { id: roomId },
           data: {
             turnPhase: 'RESOLVING_TILE',
-            activeQuestionId: question?.id,
-            activeQuestionContent: question?.content,
             activeMissionContent: mission?.content,
             activeMissionType: mission?.type,
             activeMissionDurationSeconds: mission?.durationSeconds,
@@ -909,7 +971,7 @@ export class RoomsService {
         toPosition,
         tile,
         effect: auto?.effect ?? null,
-        question,
+        qaReady,
         qaEmpty,
         mission,
         missionEmpty,
@@ -1188,6 +1250,11 @@ export class RoomsService {
     const x = votes.length - o;
     const result = o > x ? 'SUCCESS' : x > o ? 'FAILED' : 'INVALID';
     await tx.missionVote.deleteMany({ where: { voteRoundId } });
+    // A room has at most one mission in progress: the one this vote was about.
+    await tx.gameHistory.updateMany({
+      where: { roomId, kind: 'MISSION', status: 'IN_PROGRESS' },
+      data: { status: result },
+    });
     // A failed mission goes to the penalty roulette, unless the room has no penalties.
     const penaltyReady =
       result === 'FAILED' &&
@@ -1257,13 +1324,46 @@ export class RoomsService {
 
       // The latest list is the candidate set; the pick is kept as a local value,
       // so editing or deleting the source Penalty later cannot change this result.
+      // Every row has the same chance, NORMAL and TIMED alike.
       const penalties = await tx.penalty.findMany({
         where: { roomId },
-        select: { id: true, content: true },
+        select: PENALTY_FIELDS,
         orderBy: { createdAt: 'asc' },
       });
-      const penalty =
+      const picked =
         penalties.length > 0 ? penalties[randomInt(penalties.length)] : null;
+      let penalty = null;
+      if (picked) {
+        // A timed penalty starts now and runs alongside the game: the turn moves on below,
+        // and endsAt alone says when it is over (no timer, so a restart changes nothing).
+        const startedAt = new Date();
+        const durationSeconds =
+          picked.type === 'TIMED' ? picked.durationSeconds : null;
+        const endsAt =
+          durationSeconds !== null
+            ? missionEndsAt(startedAt, durationSeconds)
+            : null;
+        await tx.gameHistory.create({
+          data: {
+            roomId,
+            playerId: player.id,
+            displayName: player.displayName,
+            kind: 'PENALTY',
+            content: picked.content,
+            durationSeconds,
+            penaltySource: source,
+            status: endsAt ? 'IN_PROGRESS' : 'DONE',
+            startedAt: endsAt ? startedAt : null,
+            endsAt,
+          },
+        });
+        penalty = {
+          ...picked,
+          durationSeconds,
+          startedAt: endsAt ? startedAt.toISOString() : null,
+          endsAt: endsAt?.toISOString() ?? null,
+        };
+      }
       // Also clears the failed mission's snapshot and activePenaltySource.
       await this.advanceTurn(tx, roomId, player.turnOrder);
       return {
@@ -1452,6 +1552,26 @@ export class RoomsService {
             activeEndVoteStartedAt: null,
           },
         });
+        // Nothing of this game keeps running: an unfinished mission is cancelled, and a timed
+        // penalty still running ends now (one already past its endsAt keeps its own end).
+        const now = new Date();
+        await tx.gameHistory.updateMany({
+          where: { roomId, kind: 'MISSION', status: 'IN_PROGRESS' },
+          data: { status: 'CANCELLED' },
+        });
+        await tx.gameHistory.updateMany({
+          where: {
+            roomId,
+            kind: 'PENALTY',
+            status: 'IN_PROGRESS',
+            endsAt: { gt: now },
+          },
+          data: { endsAt: now },
+        });
+        await tx.gameHistory.updateMany({
+          where: { roomId, kind: 'PENALTY', status: 'IN_PROGRESS' },
+          data: { status: 'DONE' },
+        });
         return {
           ok: true as const,
           completed: true as const,
@@ -1539,6 +1659,99 @@ export class RoomsService {
     });
   }
 
+  // The current player settles the Q&A question: `questionId` picks one of the room's
+  // questions, null lets the server pick one at random from the current list. The room lock and
+  // the "no question yet" check make it happen once, whichever request comes first.
+  async selectQuestion(
+    roomId: string,
+    playerId: string,
+    questionId: string | null,
+  ) {
+    return this.prisma.$transaction(async (tx) => {
+      if (await this.lockAndCheckPaused(tx, roomId)) {
+        return { ok: false as const, code: 'GAME_PAUSED' as const };
+      }
+      const room = await tx.room.findUnique({
+        where: { id: roomId },
+        select: {
+          status: true,
+          currentTurnOrder: true,
+          turnPhase: true,
+          activeQuestionContent: true,
+        },
+      });
+      if (room?.status !== 'PLAYING') {
+        return { ok: false as const, code: 'GAME_NOT_PLAYING' as const };
+      }
+      const player = await tx.player.findFirst({
+        where: { id: playerId, roomId },
+        select: {
+          id: true,
+          displayName: true,
+          turnOrder: true,
+          position: true,
+        },
+      });
+      if (
+        player?.turnOrder == null ||
+        player.turnOrder !== room.currentTurnOrder
+      ) {
+        return { ok: false as const, code: 'NOT_YOUR_TURN' as const };
+      }
+      if (
+        room.turnPhase !== 'RESOLVING_TILE' ||
+        getTile(player.position).type !== TileType.QA ||
+        room.activeQuestionContent !== null
+      ) {
+        return { ok: false as const, code: 'QA_NOT_SELECTING' as const };
+      }
+      let question: { id: string; content: string } | null;
+      if (questionId === null) {
+        const questions = await tx.question.findMany({
+          where: { roomId },
+          select: { id: true, content: true },
+          orderBy: { createdAt: 'asc' },
+        });
+        if (questions.length === 0) {
+          // Everything was deleted while choosing; skip the tile, as on landing.
+          await this.advanceTurn(tx, roomId, player.turnOrder);
+          return {
+            ok: true as const,
+            empty: true as const,
+            playerId: player.id,
+            displayName: player.displayName,
+          };
+        }
+        question = questions[randomInt(questions.length)];
+      } else {
+        question = await tx.question.findFirst({
+          where: { id: questionId, roomId },
+          select: { id: true, content: true },
+        });
+        if (!question) {
+          return { ok: false as const, code: 'QUESTION_NOT_FOUND' as const };
+        }
+      }
+      // The snapshot: later edits to (or deleting) the question do not change this Q&A.
+      await tx.room.update({
+        where: { id: roomId },
+        data: {
+          activeQuestionId: question.id,
+          activeQuestionContent: question.content,
+          lastActivityAt: new Date(),
+        },
+      });
+      return {
+        ok: true as const,
+        empty: false as const,
+        playerId: player.id,
+        displayName: player.displayName,
+        question,
+        random: questionId === null,
+      };
+    });
+  }
+
   private async advanceTurn(
     tx: Prisma.TransactionClient,
     roomId: string,
@@ -1570,6 +1783,12 @@ export class RoomsService {
         activePenaltySource: null,
         lastActivityAt: new Date(),
       },
+    });
+    // A vote settles its mission before the turn moves on, so one still in progress here was
+    // dropped without a result (its performer was kicked or left).
+    await tx.gameHistory.updateMany({
+      where: { roomId, kind: 'MISSION', status: 'IN_PROGRESS' },
+      data: { status: 'CANCELLED' },
     });
   }
 

@@ -50,6 +50,28 @@ enum EndVoteChoice {
   NO
 }
 
+enum PenaltyType {
+  NORMAL
+  TIMED
+}
+
+enum GameHistoryKind {
+  MISSION
+  PENALTY
+}
+
+// IN_PROGRESS: a mission being played, or a timed penalty (over once endsAt has passed).
+// SUCCESS / FAILED / INVALID: the mission vote. CANCELLED: a mission that ended without a vote
+// (its performer left, or the game ended). DONE: a finished penalty (a NORMAL one at once).
+enum GameHistoryStatus {
+  IN_PROGRESS
+  SUCCESS
+  FAILED
+  INVALID
+  CANCELLED
+  DONE
+}
+
 model Room {
   id                           String         @id @default(uuid())
   code                         String         @unique
@@ -84,6 +106,31 @@ model Room {
   missionVotes                 MissionVote[]
   penalties                    Penalty[]
   gameEndVotes                 GameEndVote[]
+  history                      GameHistory[]
+}
+
+// The missions and penalties players got in this room's game. Every value is a snapshot:
+// there is no relation to Player, Mission or Penalty, so editing or deleting those (or a
+// player leaving) leaves the record as it was. Only deleting the room removes it.
+model GameHistory {
+  id              String            @id @default(uuid())
+  roomId          String
+  playerId        String
+  displayName     String
+  kind            GameHistoryKind
+  content         String
+  // Set for a timed mission or penalty.
+  durationSeconds Int?
+  penaltySource   PenaltySource?
+  status          GameHistoryStatus
+  // A timed penalty runs from startedAt to endsAt alongside the game; no timer is involved.
+  startedAt       DateTime?
+  endsAt          DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  room            Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, createdAt])
 }
 
 model GameEndVote {
@@ -100,12 +147,15 @@ model GameEndVote {
 }
 
 model Penalty {
-  id        String   @id @default(uuid())
-  roomId    String
-  content   String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  id              String      @id @default(uuid())
+  roomId          String
+  content         String
+  type            PenaltyType @default(NORMAL)
+  // Seconds; only for TIMED penalties.
+  durationSeconds Int?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  room            Room        @relation(fields: [roomId], references: [id], onDelete: Cascade)
 }
 
 model MissionVote {

@@ -17,7 +17,7 @@ import {
   durationError,
   formatDuration,
 } from "@/lib/content";
-import { MissionTypeBadge } from "../../_components/badge";
+import { MissionTypeBadge, TYPE_LABEL } from "../../_components/badge";
 import {
   FormError,
   cardClass,
@@ -69,6 +69,17 @@ const TEXT = {
   },
 } satisfies Record<ContentKind, Record<string, string>>;
 
+// Missions and penalties can be NORMAL or TIMED (a number of seconds); questions cannot.
+type TypedKind = Exclude<ContentKind, "questions">;
+const TYPED_TEXT = {
+  missions: { legend: "미션 유형", duration: "제한 시간", badge: "mission" },
+  penalties: { legend: "벌칙 유형", duration: "지속 시간", badge: "penalty" },
+} as const satisfies Record<TypedKind, Record<string, string>>;
+
+function isTyped(kind: ContentKind): kind is TypedKind {
+  return kind !== "questions";
+}
+
 function toDraft(item: ContentItem): Draft {
   return {
     content: item.content,
@@ -79,16 +90,16 @@ function toDraft(item: ContentItem): Draft {
 
 function validate(kind: ContentKind, draft: Draft) {
   const invalid = contentError(draft.content);
-  if (invalid || kind !== "missions" || draft.type === "NORMAL") {
+  if (invalid || !isTyped(kind) || draft.type === "NORMAL") {
     return invalid;
   }
-  return durationError(draft.duration);
+  return durationError(draft.duration, TYPED_TEXT[kind].duration);
 }
 
-// NORMAL missions send no durationSeconds; the backend stores null for them.
+// NORMAL missions / penalties send no durationSeconds; the backend stores null for them.
 function toInput(kind: ContentKind, draft: Draft): ContentInputMap[ContentKind] {
   const content = draft.content.trim();
-  if (kind !== "missions") {
+  if (!isTyped(kind)) {
     return { content };
   }
   return draft.type === "TIMED"
@@ -176,13 +187,25 @@ export function ContentTabs({
   );
 }
 
-function ContentPanel({
+// A button on every item that uses it for something (the Q&A question choice in the game).
+export type ContentPick = {
+  label: string;
+  pendingId: string | null;
+  disabled: boolean;
+  onPick: (item: ContentItem) => void;
+};
+
+// The list with add / edit / delete for one kind: a tab of ContentTabs in the lobby, or on its
+// own (standalone) during the game.
+export function ContentPanel({
   kind,
   items,
   loadFailed,
   client,
   onPatch,
   onUnauthorized,
+  pick,
+  standalone = false,
 }: {
   kind: ContentKind;
   items: ContentItem[] | null;
@@ -190,6 +213,8 @@ function ContentPanel({
   client: RoomClient;
   onPatch: (update: (list: ContentItem[]) => ContentItem[]) => void;
   onUnauthorized: () => void;
+  pick?: ContentPick;
+  standalone?: boolean;
 }) {
   const text = TEXT[kind];
   const [form, setForm] = useState<FormState>(null);
@@ -295,13 +320,14 @@ function ContentPanel({
     onCancel: closeForm,
   };
 
+  const tabProps = standalone
+    ? {}
+    : { role: "tabpanel", id: `panel-${kind}`, "aria-labelledby": `tab-${kind}`, tabIndex: 0 };
+
   return (
     <div
-      role="tabpanel"
-      id={`panel-${kind}`}
-      aria-labelledby={`tab-${kind}`}
-      tabIndex={0}
-      className="mt-4 flex flex-col gap-3 rounded-2xl focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-violet-200"
+      {...tabProps}
+      className={`flex flex-col gap-3 rounded-2xl focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-violet-200 ${standalone ? "" : "mt-4"}`}
     >
       {items === null && (
         <p className="py-6 text-center text-base text-zinc-500 dark:text-zinc-400">
@@ -338,16 +364,28 @@ function ContentPanel({
                   >
                     {item.content}
                   </p>
-                  {kind === "missions" && (
+                  {isTyped(kind) && (
                     <div className="mt-2">
                       <MissionTypeBadge
                         type={item.type ?? "NORMAL"}
                         durationSeconds={item.durationSeconds ?? null}
+                        kind={TYPED_TEXT[kind].badge}
                       />
                     </div>
                   )}
                 </div>
-                <div className="flex shrink-0 gap-2">
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  {pick && (
+                    <button
+                      type="button"
+                      onClick={() => pick.onPick(item)}
+                      disabled={pick.disabled || busy !== null}
+                      aria-describedby={`item-${item.id}`}
+                      className={smallPrimaryButton}
+                    >
+                      {pick.pendingId === item.id ? "선택 중..." : pick.label}
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => openForm({ mode: "edit", id: item.id }, toDraft(item))}
@@ -446,10 +484,10 @@ function ContentForm({
           className="w-full resize-y rounded-2xl border-2 border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-4 py-3 text-base text-zinc-900 dark:text-zinc-100 focus:border-violet-500 focus:outline-none focus-visible:ring-4 focus-visible:ring-violet-100 dark:focus-visible:ring-violet-500/30"
         />
       </div>
-      {kind === "missions" && (
+      {isTyped(kind) && (
         <>
           <fieldset className="flex flex-col">
-            <legend className="mb-2 text-base font-bold">미션 유형</legend>
+            <legend className="mb-2 text-base font-bold">{TYPED_TEXT[kind].legend}</legend>
             <div className="grid grid-cols-2 gap-2">
               {(["NORMAL", "TIMED"] as const).map((type) => (
                 <label
@@ -471,7 +509,7 @@ function ContentForm({
                     }
                     className="sr-only"
                   />
-                  {type === "NORMAL" ? "일반" : "시간제"}
+                  {TYPE_LABEL[TYPED_TEXT[kind].badge][type]}
                 </label>
               ))}
             </div>
@@ -479,7 +517,7 @@ function ContentForm({
           {draft.type === "TIMED" && (
             <div className="flex flex-col gap-2">
               <label htmlFor={`${idPrefix}-duration`} className="text-base font-bold">
-                제한 시간(초)
+                {TYPED_TEXT[kind].duration}(초)
               </label>
               <div className="flex flex-wrap items-center gap-3">
                 <input

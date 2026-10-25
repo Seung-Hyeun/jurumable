@@ -59,6 +59,8 @@ const WIDTH = {
   wide: "max-w-2xl",
   // One column on phones, two columns (players | contents) on desktop.
   split: "max-w-2xl lg:max-w-5xl",
+  // The game screen: as split, plus a game history column left of the board on wide screens.
+  game: "max-w-2xl lg:max-w-5xl xl:max-w-[88rem]",
 };
 
 export function PageShell({

@@ -13,6 +13,7 @@ import type {
   PenaltyResult,
   PenaltyStarted,
   QaCompleted,
+  Question,
   RollAck,
   RoomStatePayload,
   RoomStatePlayer,
@@ -21,8 +22,10 @@ import type {
   TurnPhase,
   VoteProgress,
 } from "@/lib/api";
-import { TILE_LABEL } from "@/lib/board";
+import { BOARD_SIZE, TILE_LABEL } from "@/lib/board";
+import { formatDuration } from "@/lib/content";
 import { clearSession } from "@/lib/session";
+import { getSettings } from "@/lib/settings";
 import { Badge, PlayerBadges } from "../../../_components/badge";
 import {
   FormError,
@@ -43,13 +46,21 @@ import {
   ShareActions,
   useTransientMessage,
 } from "../room-ui";
+import type { ContentItem } from "../content-panel";
 import { useRoom } from "../use-room";
 import { EndVoteOverlay, GameEnded } from "./end-vote-panel";
 import { CALLOUT, contentSize } from "./event-ui";
 import { Die, GameBoard, PlayerToken } from "./game-board";
+import { HistoryPanel } from "./history-panel";
 import { MissionAction, MissionPrompt, MissionVote } from "./mission-panel";
 import { PenaltyPrompt, PenaltySpin } from "./penalty-panel";
-import { QaCompleteButton, QaPrompt } from "./qa-panel";
+import {
+  QaCompleteButton,
+  QaPrompt,
+  QaQuestionPicker,
+  QaRandomButton,
+  QaSelectPrompt,
+} from "./qa-panel";
 import { TargetChoices, TargetPrompt } from "./target-panel";
 
 const PHASE_LABEL: Record<TurnPhase, string> = {
@@ -98,6 +109,89 @@ function effectMessage({ displayName: name, tile, effect }: TileResolved) {
 // seq changes on every roll, so the same result twice in a row still shows up again.
 type ShownRoll = DiceRolled & { seq: number };
 
+// How a roll is shown, the same on every screen: the die tumbles, the server's number shows, the
+// token walks tile by tile, the tile it lands on lights up, and only then the tile's event. The
+// server has already applied everything; this only holds back what is drawn. `base` is the state
+// from before the roll (whose turn it was, the token's drinks); `tick` counts tumbles while
+// rolling and tiles walked while moving.
+type RollShow = {
+  roll: DiceRolled;
+  phase: "rolling" | "reveal" | "moving" | "arrived";
+  tick: number;
+  base: RoomStatePayload | null;
+};
+
+// Faces shown while the die tumbles: a fixed sequence for show, never a game result.
+const TUMBLE_FACES = [1, 3, 5, 2, 6, 4];
+const TUMBLE_MS = 100;
+const TUMBLES = 8; // 800 ms
+const REVEAL_MS = 400;
+const STEP_MS = 220;
+const ARRIVAL_MS = 500;
+
+const SHOW_DELAY: Record<RollShow["phase"], number> = {
+  rolling: TUMBLE_MS,
+  reveal: REVEAL_MS,
+  moving: STEP_MS,
+  arrived: ARRIVAL_MS,
+};
+
+function nextShow(show: RollShow): RollShow | null {
+  switch (show.phase) {
+    case "rolling":
+      return show.tick + 1 < TUMBLES
+        ? { ...show, tick: show.tick + 1 }
+        : { ...show, phase: "reveal", tick: 0 };
+    case "reveal":
+      return { ...show, phase: "moving", tick: 1 };
+    case "moving":
+      return show.tick < show.roll.dice
+        ? { ...show, tick: show.tick + 1 }
+        : { ...show, phase: "arrived" };
+    case "arrived":
+      return null;
+  }
+}
+
+// Where the rolling token is drawn: one tile further per step, wrapping from 29 to 0.
+function shownPosition({ roll, phase, tick }: RollShow) {
+  if (phase === "rolling" || phase === "reveal") {
+    return roll.fromPosition;
+  }
+  return phase === "moving" ? (roll.fromPosition + tick) % BOARD_SIZE : roll.toPosition;
+}
+
+// The latest state as it is drawn during a roll: the turn, the turn phase and the roller's drinks
+// from before it, the roller's token where the walk has got to, and no event yet. Everything
+// else (presence, host, an end-game vote, the history) is the latest.
+function duringShow(show: RollShow, state: RoomStatePayload): RoomStatePayload {
+  const base = show.base ?? state;
+  const before = base.players.find((player) => player.id === show.roll.playerId);
+  const position = shownPosition(show);
+  return {
+    ...state,
+    room: {
+      ...state.room,
+      currentTurnOrder: base.room.currentTurnOrder,
+      turnPhase: base.room.turnPhase,
+    },
+    players: state.players.map((player) =>
+      player.id === show.roll.playerId
+        ? { ...player, position, accumulatedDrinks: before?.accumulatedDrinks ?? player.accumulatedDrinks }
+        : player,
+    ),
+    activeEvent: null,
+  };
+}
+
+// 설정 > 애니메이션 끔 or the OS "reduce motion": the result is shown at once instead.
+function motionAllowed() {
+  return (
+    getSettings().animationsEnabled &&
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 // The latest event message, the same for everyone; lines are smaller lines under it. targetId
 // marks a 지목 result, so the chosen player's own screen can say it more clearly. penalty is a
 // roulette result, shown as its own card (the turn has already moved on by then).
@@ -105,7 +199,7 @@ type Notice = {
   text: string;
   lines?: string[];
   targetId?: string;
-  penalty?: { label: string; content: string };
+  penalty?: { label: string; content: string; durationSeconds: number | null };
 };
 
 // The O / X counts are public only now, with the result. For FAILED the next step is added by the
@@ -152,20 +246,58 @@ export default function GameScreen({ code }: { code: string }) {
   const [kickingId, setKickingId] = useState<string | null>(null);
   const [kickError, setKickError] = useState<string | null>(null);
   const [message, showMessage] = useTransientMessage();
+  // The room's questions, for choosing the Q&A question (loaded like the lobby's lists).
+  const [questions, setQuestions] = useState<Question[] | null>(null);
+  const [questionsFailed, setQuestionsFailed] = useState(false);
+  // Bumped whenever the list changes from the socket or an edit, so an older GET cannot win.
+  const questionsVersion = useRef(0);
+  // The roll being shown (see RollShow); null when nothing is held back.
+  const [show, setShow] = useState<RollShow | null>(null);
+  // The state last drawn, so a roll can start from how things were just before it.
+  const latest = useRef<RoomStatePayload | null>(null);
 
-  const { view, connection, state, socketRef, retry, hostChanged, reconnected } = useRoom(code, (s) => {
-    // Rolls broadcast while this socket was away are not replayed, so an old one is dropped.
+  const { view, connection, state, socketRef, retry, expireSession, hostChanged, reconnected } = useRoom(code, (s, { client, expire, isCancelled }) => {
+    const loadQuestions = () => {
+      const version = questionsVersion.current;
+      void client.list("questions").then((result) => {
+        if (isCancelled() || questionsVersion.current !== version) {
+          return;
+        }
+        if (result.ok) {
+          setQuestionsFailed(false);
+          setQuestions(result.data);
+        } else if (result.status === 401) {
+          expire();
+        } else {
+          setQuestionsFailed(true);
+        }
+      });
+    };
+    // Rolls broadcast while this socket was away are not replayed, so an old one is dropped
+    // (and never shown again); updates to the questions are not replayed either.
     s.on("connect", () => {
       setLastRoll(null);
+      setShow(null);
       setNotice(null);
       setLiveVote(null);
       setLiveEndVote(null);
       setEndRound((round) => round + 1);
+      loadQuestions();
     });
-    // Transient display only: positions always come from the latest room:state.
+    s.on("questions:updated", (payload: { questions: Question[] }) => {
+      questionsVersion.current += 1;
+      setQuestions(payload.questions);
+    });
+    // Transient display only: the result and positions always come from the latest room:state.
+    // The show starts from the state drawn so far, which is still the one before this roll.
     s.on("game:dice-rolled", (payload: DiceRolled) => {
       setLastRoll((previous) => ({ ...payload, seq: (previous?.seq ?? 0) + 1 }));
       setNotice(null);
+      setShow(
+        motionAllowed()
+          ? { roll: payload, phase: "rolling", tick: 0, base: latest.current }
+          : null,
+      );
     });
     s.on("game:tile-resolved", (payload: TileResolved) =>
       setNotice({ text: effectMessage(payload) }),
@@ -173,12 +305,11 @@ export default function GameScreen({ code }: { code: string }) {
     // The Q&A, 지목 and mission screens come from room:state.activeEvent (also after a
     // refresh), so these start signals only clear the previous message.
     s.on("game:qa", () => setNotice(null));
+    s.on("game:qa-selected", () => setNotice(null));
     s.on("game:target-required", () => setNotice(null));
     s.on("game:mission", () => setNotice(null));
     s.on("room:state", (payload: RoomStatePayload) => {
-      if (payload.activeEvent?.type === "MISSION") {
-        setServerOffset(Date.parse(payload.activeEvent.serverTime) - Date.now());
-      }
+      setServerOffset(Date.parse(payload.serverTime) - Date.now());
     });
     s.on("game:mission-started", (payload: MissionStarted) => {
       setServerOffset(Date.parse(payload.serverTime) - Date.now());
@@ -226,6 +357,7 @@ export default function GameScreen({ code }: { code: string }) {
         penalty: {
           label: source === "MISSION_FAILURE" ? "미션 실패 벌칙" : "벌칙 칸 결과",
           content: penalty.content,
+          durationSeconds: penalty.durationSeconds,
         },
       }),
     );
@@ -264,6 +396,24 @@ export default function GameScreen({ code }: { code: string }) {
       router.replace(`/room/${code}`);
     }
   }, [status, code, router]);
+
+  // game:dice-rolled arrives before the roll's room:state, so this still holds the state from
+  // before the roll when the show starts.
+  useEffect(() => {
+    latest.current = state;
+  }, [state]);
+
+  // Moves the show on one tumble / tile / phase at a time; at the end the latest state is drawn.
+  useEffect(() => {
+    if (!show) {
+      return;
+    }
+    const timer = window.setTimeout(
+      () => setShow((current) => (current ? nextShow(current) : null)),
+      SHOW_DELAY[show.phase],
+    );
+    return () => window.clearTimeout(timer);
+  }, [show]);
 
   function roll() {
     const socket = socketRef.current;
@@ -346,8 +496,15 @@ export default function GameScreen({ code }: { code: string }) {
 
   function retryGame() {
     setLastRoll(null);
+    setShow(null);
     setNotice(null);
     retry();
+  }
+
+  // Applies the requester's own REST result right away; the socket update follows for everyone.
+  function patchQuestions(update: (list: ContentItem[]) => ContentItem[]) {
+    questionsVersion.current += 1;
+    setQuestions((list) => (list ? update(list) : list));
   }
 
   if (view.kind === "checking") {
@@ -363,9 +520,11 @@ export default function GameScreen({ code }: { code: string }) {
     return <RoomLoading message="대기방으로 이동 중..." />;
   }
 
-  const { room, activeEvent, endVote } = state;
-  const last = state.players.length;
-  const players = [...state.players].sort(
+  // What is drawn: the latest state, held back where a roll is still being shown.
+  const shown = show ? duringShow(show, state) : state;
+  const { room, activeEvent, endVote, history } = shown;
+  const last = shown.players.length;
+  const players = [...shown.players].sort(
     (a, b) => (a.turnOrder ?? last) - (b.turnOrder ?? last),
   );
   const ended = room.status === "ENDED";
@@ -390,7 +549,18 @@ export default function GameScreen({ code }: { code: string }) {
     room.turnPhase === "AWAITING_ROLL" &&
     !paused &&
     connection === "connected" &&
-    !rolling;
+    !rolling &&
+    !show;
+  // The QA tile before its question is chosen (from room:state only).
+  const qaSelecting =
+    room.status === "PLAYING" &&
+    room.turnPhase === "RESOLVING_TILE" &&
+    activeEvent?.type === "QA_SELECTING"
+      ? activeEvent
+      : null;
+  const qaSelectingPerformer = qaSelecting
+    ? players.find((player) => player.id === qaSelecting.playerId)
+    : undefined;
   // The Q&A in progress, taken from room:state only; it is always the current player's.
   const qa =
     room.status === "PLAYING" &&
@@ -439,7 +609,7 @@ export default function GameScreen({ code }: { code: string }) {
           ? "내 차례가 되면 굴릴 수 있습니다."
           : room.turnPhase === "RESOLVING_TILE"
             ? "칸 효과 처리가 끝나면 다음 차례로 넘어갑니다."
-            : rolling
+            : rolling || show
               ? "주사위를 굴리는 중입니다."
               : paused
                 ? "게임 종료 투표가 끝나면 굴릴 수 있습니다."
@@ -505,203 +675,283 @@ export default function GameScreen({ code }: { code: string }) {
   }
 
   return (
-    <PageShell width="split">
+    <PageShell width="game">
       {header}
 
-      {/* Phones / tablets: board, then players. Desktop: board | players. */}
-      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_18rem] lg:items-start">
-        <GameBoard players={players} myId={view.playerId} currentId={current?.id ?? null}>
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-2xl bg-white/85 dark:bg-zinc-900/85 p-3 text-center wrap-anywhere sm:p-4">
-            <div role="status" className="flex w-full flex-col items-center gap-3">
-              {qa && current ? (
-                <QaPrompt
-                  question={qa.content}
-                  performer={current}
-                  isPerformer={isMyTurn}
-                  paused={paused}
-                />
-              ) : target ? (
-                <TargetPrompt
-                  performerName={target.displayName}
-                  isPerformer={target.playerId === view.playerId}
-                  performerOnline={
-                    players.find((player) => player.id === target.playerId)?.isOnline === true
-                  }
-                  paused={paused}
-                />
-              ) : mission ? (
-                <MissionPrompt
-                  mission={mission.mission}
-                  performerName={mission.displayName ?? ""}
-                  isPerformer={mission.playerId === view.playerId}
-                  performerOnline={
-                    players.find((player) => player.id === mission.playerId)?.isOnline === true
-                  }
-                  paused={paused}
-                  serverOffset={serverOffset}
-                  voteProgress={voteProgress}
-                  notice={notice?.text ?? null}
-                />
-              ) : penalty ? (
-                <PenaltyPrompt
-                  performerName={penalty.displayName ?? ""}
-                  isPerformer={penalty.playerId === view.playerId}
-                  performerOnline={
-                    players.find((player) => player.id === penalty.playerId)?.isOnline === true
-                  }
-                  source={penalty.source}
-                  failedMission={penalty.mission}
-                  paused={paused}
-                  notice={notice}
-                />
-              ) : (
-                <>
-                  {/* Whose turn it is comes first; the phase is only a small badge under it. */}
-                  {current && (
-                    <h2
-                      className={
-                        isMyTurn
-                          ? "text-2xl font-black text-violet-700 dark:text-violet-300"
-                          : "text-xl font-black text-zinc-900 dark:text-zinc-100"
-                      }
-                    >
-                      {isMyTurn ? "내 차례입니다!" : `${current.displayName}님의 차례`}
+      {/* Phones / tablets: board, game history (opens on demand), players. lg: board | players
+          with the history under the board. xl: history | board | players. */}
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_18rem] lg:items-start xl:grid-cols-[18rem_minmax(0,1fr)_18rem]">
+        <div className="flex min-w-0 flex-col gap-4 lg:col-start-1 lg:row-start-1 xl:col-start-2">
+          <GameBoard
+            players={players}
+            myId={view.playerId}
+            currentId={current?.id ?? null}
+            arrival={show?.phase === "arrived" ? show.roll.toPosition : null}
+          >
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-2xl bg-white/85 dark:bg-zinc-900/85 p-3 text-center wrap-anywhere sm:p-4">
+              <div role="status" className="flex w-full flex-col items-center gap-3">
+                {show ? (
+                  // The roll, step by step; the tile's event (or the next turn) follows after it.
+                  <div className="flex flex-col items-center gap-3">
+                    <h2 className="text-xl font-black text-zinc-900 dark:text-zinc-100">
+                      {show.roll.playerId === view.playerId
+                        ? "주사위를 굴립니다!"
+                        : `${show.roll.displayName}님이 주사위를 굴립니다`}
                     </h2>
-                  )}
-                  {room.turnPhase && <Badge size="md">{PHASE_LABEL[room.turnPhase]}</Badge>}
-                  {(lastRoll || (notice && !notice.penalty)) && (
-                    // The latest roll and what it did, the same on every screen. Small and
-                    // below the turn, so it never covers the next action; the next roll replaces it.
-                    <div className="w-full max-w-xs rounded-2xl bg-white dark:bg-zinc-800 p-3 text-left shadow-sm ring-1 ring-black/5 dark:ring-white/10">
-                      <p className="text-xs font-bold text-zinc-500 dark:text-zinc-400">최근 결과</p>
-                      {lastRoll && (
-                        <div key={lastRoll.seq} className="mt-2 flex items-center gap-3">
-                          <Die value={lastRoll.dice} />
-                          <div className="min-w-0">
-                            <p className="font-bold">
-                              {lastRoll.displayName}님이 🎲 {lastRoll.dice}
-                            </p>
-                            <p className="text-sm text-zinc-600 dark:text-zinc-400 tabular-nums">
-                              {lastRoll.fromPosition} → {lastRoll.toPosition}
-                            </p>
-                            <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                              도착:{" "}
-                              <span className="font-bold text-zinc-900 dark:text-zinc-100">
-                                {TILE_LABEL[lastRoll.tile.type]}
-                              </span>
-                            </p>
-                          </div>
-                        </div>
-                      )}
-                      {notice && !notice.penalty && (
-                        <div
-                          className={`text-center ${lastRoll ? "mt-2 border-t border-zinc-100 dark:border-zinc-700 pt-2" : "mt-1"}`}
-                        >
-                          <p className="text-lg font-black text-rose-700 dark:text-rose-300">{notice.text}</p>
-                          {notice.lines?.map((line) => (
-                            <p key={line} className="text-sm font-bold text-zinc-700 dark:text-zinc-300">
-                              {line}
-                            </p>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {notice?.penalty && (
-                    <div className="w-full max-w-xs rounded-2xl bg-rose-50 dark:bg-rose-500/10 px-4 py-3 ring-2 ring-rose-200 dark:ring-rose-400/40 starting:scale-90 starting:opacity-0 motion-safe:transition-[scale,opacity] motion-safe:duration-300">
-                      <p className="text-sm font-black text-rose-700 dark:text-rose-300">
-                        <span aria-hidden="true">🎡 </span>벌칙 결과 · {notice.penalty.label}
-                      </p>
-                      <p className="mt-1 text-sm font-bold text-zinc-600 dark:text-zinc-400">{notice.text}</p>
-                      <p
-                        className={`mt-1 font-black whitespace-pre-wrap text-zinc-900 dark:text-zinc-100 ${contentSize(notice.penalty.content)}`}
-                      >
-                        {notice.penalty.content}
-                      </p>
-                    </div>
-                  )}
-                  {notice?.targetId === view.playerId && (
-                    <p className="w-full max-w-xs rounded-xl bg-rose-100 dark:bg-rose-500/20 px-3 py-2 text-lg font-black text-rose-800 dark:text-rose-200">
-                      내가 지목되었습니다! 한 잔!
+                    <Die
+                      key={show.phase === "rolling" ? "rolling" : "result"}
+                      value={
+                        show.phase === "rolling"
+                          ? TUMBLE_FACES[show.tick % TUMBLE_FACES.length]
+                          : show.roll.dice
+                      }
+                      rolling={show.phase === "rolling"}
+                    />
+                    <p className="text-2xl font-black tabular-nums text-violet-700 dark:text-violet-300">
+                      {show.phase === "rolling" ? "🎲 ..." : `🎲 ${show.roll.dice}`}
                     </p>
-                  )}
-                  {current && !current.isOnline && (
-                    <p className={CALLOUT}>{current.displayName}님의 재접속을 기다리는 중입니다.</p>
-                  )}
-                </>
+                    {show.phase !== "rolling" && (
+                      <p className="text-sm font-bold text-zinc-600 dark:text-zinc-400 tabular-nums">
+                        {show.roll.fromPosition} → {show.roll.toPosition}
+                        {show.phase === "arrived" && ` · ${TILE_LABEL[show.roll.tile.type]} 도착!`}
+                      </p>
+                    )}
+                  </div>
+                ) : qaSelecting && qaSelectingPerformer ? (
+                  <QaSelectPrompt
+                    performer={qaSelectingPerformer}
+                    isPerformer={qaSelecting.playerId === view.playerId}
+                    paused={paused}
+                  />
+                ) : qa && current ? (
+                  <QaPrompt
+                    question={qa.content}
+                    performer={current}
+                    isPerformer={isMyTurn}
+                    paused={paused}
+                  />
+                ) : target ? (
+                  <TargetPrompt
+                    performerName={target.displayName}
+                    isPerformer={target.playerId === view.playerId}
+                    performerOnline={
+                      players.find((player) => player.id === target.playerId)?.isOnline === true
+                    }
+                    paused={paused}
+                  />
+                ) : mission ? (
+                  <MissionPrompt
+                    mission={mission.mission}
+                    performerName={mission.displayName ?? ""}
+                    isPerformer={mission.playerId === view.playerId}
+                    performerOnline={
+                      players.find((player) => player.id === mission.playerId)?.isOnline === true
+                    }
+                    paused={paused}
+                    serverOffset={serverOffset}
+                    voteProgress={voteProgress}
+                    notice={notice?.text ?? null}
+                  />
+                ) : penalty ? (
+                  <PenaltyPrompt
+                    performerName={penalty.displayName ?? ""}
+                    isPerformer={penalty.playerId === view.playerId}
+                    performerOnline={
+                      players.find((player) => player.id === penalty.playerId)?.isOnline === true
+                    }
+                    source={penalty.source}
+                    failedMission={penalty.mission}
+                    paused={paused}
+                    notice={notice}
+                  />
+                ) : (
+                  <>
+                    {/* Whose turn it is comes first; the phase is only a small badge under it. */}
+                    {current && (
+                      <h2
+                        className={
+                          isMyTurn
+                            ? "text-2xl font-black text-violet-700 dark:text-violet-300"
+                            : "text-xl font-black text-zinc-900 dark:text-zinc-100"
+                        }
+                      >
+                        {isMyTurn ? "내 차례입니다!" : `${current.displayName}님의 차례`}
+                      </h2>
+                    )}
+                    {room.turnPhase && <Badge size="md">{PHASE_LABEL[room.turnPhase]}</Badge>}
+                    {(lastRoll || (notice && !notice.penalty)) && (
+                      // The latest roll and what it did, the same on every screen. Small and
+                      // below the turn, so it never covers the next action; the next roll replaces it.
+                      <div className="w-full max-w-xs rounded-2xl bg-white dark:bg-zinc-800 p-3 text-left shadow-sm ring-1 ring-black/5 dark:ring-white/10">
+                        <p className="text-xs font-bold text-zinc-500 dark:text-zinc-400">최근 결과</p>
+                        {lastRoll && (
+                          <div key={lastRoll.seq} className="mt-2 flex items-center gap-3">
+                            <Die value={lastRoll.dice} />
+                            <div className="min-w-0">
+                              <p className="font-bold">
+                                {lastRoll.displayName}님이 🎲 {lastRoll.dice}
+                              </p>
+                              <p className="text-sm text-zinc-600 dark:text-zinc-400 tabular-nums">
+                                {lastRoll.fromPosition} → {lastRoll.toPosition}
+                              </p>
+                              <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                                도착:{" "}
+                                <span className="font-bold text-zinc-900 dark:text-zinc-100">
+                                  {TILE_LABEL[lastRoll.tile.type]}
+                                </span>
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                        {notice && !notice.penalty && (
+                          <div
+                            className={`text-center ${lastRoll ? "mt-2 border-t border-zinc-100 dark:border-zinc-700 pt-2" : "mt-1"}`}
+                          >
+                            <p className="text-lg font-black text-rose-700 dark:text-rose-300">{notice.text}</p>
+                            {notice.lines?.map((line) => (
+                              <p key={line} className="text-sm font-bold text-zinc-700 dark:text-zinc-300">
+                                {line}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {notice?.penalty && (
+                      <div className="w-full max-w-xs rounded-2xl bg-rose-50 dark:bg-rose-500/10 px-4 py-3 ring-2 ring-rose-200 dark:ring-rose-400/40 starting:scale-90 starting:opacity-0 motion-safe:transition-[scale,opacity] motion-safe:duration-300">
+                        <p className="text-sm font-black text-rose-700 dark:text-rose-300">
+                          <span aria-hidden="true">🎡 </span>벌칙 결과 · {notice.penalty.label}
+                        </p>
+                        <p className="mt-1 text-sm font-bold text-zinc-600 dark:text-zinc-400">{notice.text}</p>
+                        <p
+                          className={`mt-1 font-black whitespace-pre-wrap text-zinc-900 dark:text-zinc-100 ${contentSize(notice.penalty.content)}`}
+                        >
+                          {notice.penalty.content}
+                        </p>
+                        {notice.penalty.durationSeconds !== null && (
+                          // It runs on while the game goes on; the time left is in 게임 기록.
+                          <p className="mt-1 text-sm font-bold text-sky-700 dark:text-sky-300">
+                            ⏱ 시간형 · {formatDuration(notice.penalty.durationSeconds)} 동안 · 게임 기록에서 남은 시간 확인
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    {notice?.targetId === view.playerId && (
+                      <p className="w-full max-w-xs rounded-xl bg-rose-100 dark:bg-rose-500/20 px-3 py-2 text-lg font-black text-rose-800 dark:text-rose-200">
+                        내가 지목되었습니다! 한 잔!
+                      </p>
+                    )}
+                    {current && !current.isOnline && (
+                      <p className={CALLOUT}>{current.displayName}님의 재접속을 기다리는 중입니다.</p>
+                    )}
+                  </>
+                )}
+              </div>
+              {show ? null : qaSelecting ? (
+                // Only the current player decides; everyone may still add questions to the list.
+                qaSelecting.playerId === view.playerId && (
+                  <QaRandomButton
+                    socketRef={socketRef}
+                    connected={connection === "connected"}
+                    paused={paused}
+                  />
+                )
+              ) : qa && current ? (
+                // Other players get no button at all, so nobody else seems able to finish it.
+                isMyTurn && (
+                  <QaCompleteButton
+                    socketRef={socketRef}
+                    connected={connection === "connected"}
+                    paused={paused}
+                  />
+                )
+              ) : target ? (
+                // Picking happens only here, never on the player list, and only for the picker.
+                target.playerId === view.playerId && (
+                  <TargetChoices
+                    targets={target.eligibleTargets}
+                    socketRef={socketRef}
+                    connected={connection === "connected"}
+                    paused={paused}
+                  />
+                )
+              ) : mission ? (
+                // The performer acts only while READY (a running timed mission cannot be ended
+                // early); everyone else votes while AWAITING_VOTE. The performer never gets O / X.
+                mission.playerId === view.playerId ? (
+                  mission.mission.stage === "READY" && (
+                    <MissionAction
+                      type={mission.mission.type}
+                      durationSeconds={mission.mission.durationSeconds}
+                      socketRef={socketRef}
+                      connected={connection === "connected"}
+                      paused={paused}
+                    />
+                  )
+                ) : (
+                  mission.mission.stage === "AWAITING_VOTE" && (
+                    <MissionVote
+                      socketRef={socketRef}
+                      connected={connection === "connected"}
+                      paused={paused}
+                    />
+                  )
+                )
+              ) : penalty ? (
+                // Only the player getting the penalty spins; nobody can do it for them.
+                penalty.playerId === view.playerId && (
+                  <PenaltySpin
+                    socketRef={socketRef}
+                    connected={connection === "connected"}
+                    paused={paused}
+                  />
+                )
+              ) : (
+                <div className="flex w-full max-w-xs flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={roll}
+                    disabled={!canRoll}
+                    aria-describedby="roll-hint"
+                    className={primaryButton}
+                  >
+                    {rolling ? "굴리는 중..." : "주사위 굴리기"}
+                  </button>
+                  <p id="roll-hint" className="text-sm text-zinc-600 dark:text-zinc-400">
+                    {rollHint}
+                  </p>
+                  <FormError message={rollError} />
+                </div>
               )}
             </div>
-            {qa && current ? (
-              // Other players get no button at all, so nobody else seems able to finish it.
-              isMyTurn && (
-                <QaCompleteButton
-                  socketRef={socketRef}
-                  connected={connection === "connected"}
-                  paused={paused}
-                />
-              )
-            ) : target ? (
-              // Picking happens only here, never on the player list, and only for the picker.
-              target.playerId === view.playerId && (
-                <TargetChoices
-                  targets={target.eligibleTargets}
-                  socketRef={socketRef}
-                  connected={connection === "connected"}
-                  paused={paused}
-                />
-              )
-            ) : mission ? (
-              // The performer acts only while READY (a running timed mission cannot be ended
-              // early); everyone else votes while AWAITING_VOTE. The performer never gets O / X.
-              mission.playerId === view.playerId ? (
-                mission.mission.stage === "READY" && (
-                  <MissionAction
-                    type={mission.mission.type}
-                    durationSeconds={mission.mission.durationSeconds}
-                    socketRef={socketRef}
-                    connected={connection === "connected"}
-                    paused={paused}
-                  />
-                )
-              ) : (
-                mission.mission.stage === "AWAITING_VOTE" && (
-                  <MissionVote
-                    socketRef={socketRef}
-                    connected={connection === "connected"}
-                    paused={paused}
-                  />
-                )
-              )
-            ) : penalty ? (
-              // Only the player getting the penalty spins; nobody can do it for them.
-              penalty.playerId === view.playerId && (
-                <PenaltySpin
-                  socketRef={socketRef}
-                  connected={connection === "connected"}
-                  paused={paused}
-                />
-              )
-            ) : (
-              <div className="flex w-full max-w-xs flex-col gap-2">
-                <button
-                  type="button"
-                  onClick={roll}
-                  disabled={!canRoll}
-                  aria-describedby="roll-hint"
-                  className={primaryButton}
-                >
-                  {rolling ? "굴리는 중..." : "주사위 굴리기"}
-                </button>
-                <p id="roll-hint" className="text-sm text-zinc-600 dark:text-zinc-400">
-                  {rollHint}
-                </p>
-                <FormError message={rollError} />
-              </div>
-            )}
-          </div>
-        </GameBoard>
+          </GameBoard>
+          {qaSelecting && qaSelectingPerformer && (
+            <QaQuestionPicker
+              questions={questions}
+              loadFailed={questionsFailed}
+              client={view.client}
+              onPatch={patchQuestions}
+              onUnauthorized={expireSession}
+              performerName={qaSelectingPerformer.displayName}
+              isPerformer={qaSelecting.playerId === view.playerId}
+              socketRef={socketRef}
+              connected={connection === "connected"}
+              paused={paused}
+            />
+          )}
+        </div>
 
-        <section aria-labelledby="game-players-title" className={cardClass}>
+        <HistoryPanel
+          entries={history}
+          serverOffset={serverOffset}
+          myId={view.playerId}
+          className="lg:col-start-1 lg:row-start-2 xl:sticky xl:top-4 xl:col-start-1 xl:row-start-1"
+        />
+
+        <section
+          aria-labelledby="game-players-title"
+          className={`${cardClass} lg:col-start-2 lg:row-start-1 xl:col-start-3`}
+        >
           <h2 id="game-players-title" className="text-lg font-bold">
             참가자
           </h2>

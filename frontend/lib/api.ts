@@ -68,8 +68,11 @@ export type PenaltySource = "TILE" | "MISSION_FAILURE";
 // comes with the server's clock (serverTime) for the countdown, and voteProgress while
 // AWAITING_VOTE (it does not say whether this player has voted). A failed mission waiting for
 // its penalty arrives as PENALTY with source MISSION_FAILURE and that mission's snapshot.
+// QA_SELECTING: the current player is on a QA tile and the question is not chosen yet (they
+// pick one, or ask the server for a random one); QA follows once it is.
 export type ActiveEvent =
   | { type: "QA"; question: { content: string } }
+  | { type: "QA_SELECTING"; playerId: string; displayName: string }
   | {
       type: "MISSION";
       playerId: string | null;
@@ -102,6 +105,29 @@ export interface RoomStatePayload {
   // Present while an end-game vote pauses the game. total is every player in the room, online
   // or not; like voteProgress, it does not say whether this player has voted.
   endVote: { active: true; voted: number; total: number } | null;
+  // The latest missions / penalties of this game, newest first (the backend keeps them in the
+  // DB, so a refresh shows the same list).
+  history: HistoryEntry[];
+  // The server clock when this state was sent, for every countdown.
+  serverTime: string;
+}
+
+export type HistoryStatus = "IN_PROGRESS" | "SUCCESS" | "FAILED" | "INVALID" | "CANCELLED" | "DONE";
+
+// One mission or penalty a player got, as it was at the time (a snapshot). A timed penalty is
+// IN_PROGRESS until endsAt; from then on it is over, even if the status still says IN_PROGRESS.
+export interface HistoryEntry {
+  id: string;
+  playerId: string;
+  displayName: string;
+  kind: "MISSION" | "PENALTY";
+  content: string;
+  durationSeconds: number | null;
+  penaltySource: PenaltySource | null;
+  status: HistoryStatus;
+  startedAt: string | null;
+  endsAt: string | null;
+  createdAt: string;
 }
 
 // `game:dice-rolled` and `game:tile-resolved` (after an automatic tile) payloads.
@@ -126,6 +152,14 @@ export interface TileResolved {
   displayName: string;
   tile: { index: number; type: TileType };
   effect: TileEffect;
+}
+
+// `game:qa-selected`: the question the current player chose (random: the server picked it).
+export interface QaSelected {
+  playerId: string;
+  displayName: string;
+  question: { id: string; content: string };
+  random: boolean;
 }
 
 // `game:qa-completed` payload.
@@ -173,7 +207,15 @@ export interface PenaltyResult {
   playerId: string | null;
   displayName: string | null;
   source: PenaltySource;
-  penalty: { id: string; content: string };
+  // startedAt / endsAt for a timed penalty, which runs on while the game goes on.
+  penalty: {
+    id: string;
+    content: string;
+    type: PenaltyType;
+    durationSeconds: number | null;
+    startedAt: string | null;
+    endsAt: string | null;
+  };
 }
 
 // `game:end-vote-result`: only now are the YES / NO counts public. ended is the backend's
@@ -213,6 +255,12 @@ export type RollAck =
 
 export type QaCompleteAck =
   | { ok: true }
+  | { ok: false; code: string; message: string };
+
+// `game:qa-select` / `game:qa-random`; empty: every question was gone, so the tile was skipped.
+export type QaSelectAck =
+  | { ok: true; question: { id: string; content: string }; random: boolean }
+  | { ok: true; empty: true }
   | { ok: false; code: string; message: string };
 
 // On success the backend also sends targetPlayer, or empty: true when the tile was skipped.
@@ -262,9 +310,14 @@ export interface Mission {
   durationSeconds: number | null;
 }
 
+// TIMED penalties last durationSeconds while the game goes on; NORMAL ones are done at once.
+export type PenaltyType = MissionType;
+
 export interface Penalty {
   id: string;
   content: string;
+  type: PenaltyType;
+  durationSeconds: number | null;
 }
 
 export interface ContentMap {
@@ -286,7 +339,9 @@ export interface ContentInputMap {
   missions:
     | { content: string; type: "NORMAL" }
     | { content: string; type: "TIMED"; durationSeconds: number };
-  penalties: { content: string };
+  penalties:
+    | { content: string; type: "NORMAL" }
+    | { content: string; type: "TIMED"; durationSeconds: number };
 }
 
 // The single-item key in POST / PATCH responses: { question }, { mission }, { penalty }.

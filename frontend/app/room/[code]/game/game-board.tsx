@@ -74,13 +74,14 @@ const PIPS: Record<number, number[]> = {
   6: [0, 2, 3, 5, 6, 8],
 };
 
-// Only draws the value the server rolled.
-export function Die({ value }: { value: number }) {
+// Draws the value the server rolled. While rolling it only tumbles through faces for show
+// (the caller passes them in turn); the value that counts is the server's, shown after.
+export function Die({ value, rolling = false }: { value: number; rolling?: boolean }) {
   const pips = PIPS[value] ?? [];
   return (
     <span
       aria-hidden="true"
-      className={`grid size-12 shrink-0 grid-cols-3 grid-rows-3 rounded-xl bg-white p-1.5 shadow-md ring-1 ring-black/10 dark:ring-white/15 sm:size-14 sm:p-2 ${POP_IN}`}
+      className={`grid size-12 shrink-0 grid-cols-3 grid-rows-3 rounded-xl bg-white p-1.5 shadow-md ring-1 ring-black/10 dark:ring-white/15 sm:size-14 sm:p-2 ${rolling ? "dice-rolling" : POP_IN}`}
     >
       {Array.from({ length: 9 }, (_, cell) => (
         <span
@@ -93,15 +94,18 @@ export function Die({ value }: { value: number }) {
 }
 
 // Tiles are decoration for sighted players; the same facts are in the player list as text.
+// arrival: the tile a token has just reached at the end of a roll, briefly marked.
 export function GameBoard({
   players,
   myId,
   currentId,
+  arrival = null,
   children,
 }: {
   players: RoomStatePlayer[];
   myId: string;
   currentId: string | null;
+  arrival?: number | null;
   children: ReactNode;
 }) {
   const current = players.find((player) => player.id === currentId);
@@ -116,7 +120,7 @@ export function GameBoard({
             title={`${index} · ${TILE_LABEL[type]}`}
             aria-hidden="true"
             style={style}
-            className={`flex min-w-0 flex-col gap-0.5 rounded-lg p-1 col-(--phone-col) row-(--phone-row) sm:col-(--wide-col) sm:row-(--wide-row) sm:p-1.5 ${TILE_TONE[type]} ${current?.position === index ? "ring-2 ring-violet-600 dark:ring-violet-400" : "dark:ring-1 dark:ring-white/10"}`}
+            className={`flex min-w-0 flex-col gap-0.5 rounded-lg p-1 col-(--phone-col) row-(--phone-row) sm:col-(--wide-col) sm:row-(--wide-row) sm:p-1.5 ${TILE_TONE[type]} ${arrival === index ? "tile-arrival ring-4 ring-amber-400" : current?.position === index ? "ring-2 ring-violet-600 dark:ring-violet-400" : "dark:ring-1 dark:ring-white/10"}`}
           >
             <span className="flex items-center justify-between gap-0.5 text-[10px] leading-none font-bold text-zinc-600 dark:text-zinc-300 tabular-nums sm:text-xs">
               {index}
