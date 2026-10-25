@@ -16,6 +16,11 @@ import type {
 } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma.service.js';
 import { TileType, getTile, movePosition, resolveAutoTile } from './board.js';
+import {
+  DEFAULT_MISSIONS,
+  DEFAULT_PENALTIES,
+  DEFAULT_QUESTIONS,
+} from './default-room-content.js';
 import { CreateRoomDto } from './dto/create-room.dto.js';
 import { JoinRoomDto } from './dto/join-room.dto.js';
 import { ReconnectRoomDto } from './dto/reconnect-room.dto.js';
@@ -126,6 +131,32 @@ export class RoomsService {
               displayName: true,
               isHost: true,
             },
+          });
+          // The room's starting content, in this same transaction: an attempt that fails (a code
+          // collision included) leaves none of it behind. createMany gives every row the same
+          // createdAt, so the rows are 1 ms apart to keep the lists in this order.
+          const now = Date.now();
+          const roomId = room.id;
+          await tx.question.createMany({
+            data: DEFAULT_QUESTIONS.map((content, i) => ({
+              roomId,
+              content,
+              createdAt: new Date(now + i),
+            })),
+          });
+          await tx.mission.createMany({
+            data: DEFAULT_MISSIONS.map((mission, i) => ({
+              roomId,
+              ...mission,
+              createdAt: new Date(now + i),
+            })),
+          });
+          await tx.penalty.createMany({
+            data: DEFAULT_PENALTIES.map((content, i) => ({
+              roomId,
+              content,
+              createdAt: new Date(now + i),
+            })),
           });
           return { room, host: { ...host, reconnectToken: token } };
         });
