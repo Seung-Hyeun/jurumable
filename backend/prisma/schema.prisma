@@ -1,0 +1,161 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum RoomStatus {
+  WAITING
+  PLAYING
+  ENDED
+}
+
+enum TurnPhase {
+  AWAITING_ROLL
+  RESOLVING_TILE
+}
+
+enum MissionType {
+  NORMAL
+  TIMED
+}
+
+enum MissionStage {
+  READY
+  RUNNING
+  AWAITING_VOTE
+  PENALTY_PENDING
+}
+
+enum MissionVoteChoice {
+  O
+  X
+}
+
+enum PenaltySource {
+  TILE
+  MISSION_FAILURE
+}
+
+enum EndVoteChoice {
+  YES
+  NO
+}
+
+model Room {
+  id                           String         @id @default(uuid())
+  code                         String         @unique
+  maxPlayers                   Int
+  status                       RoomStatus     @default(WAITING)
+  currentTurnOrder             Int?
+  turnPhase                    TurnPhase?
+  // Snapshot of the Q&A in progress; kept even if the source Question changes.
+  activeQuestionId             String?
+  activeQuestionContent        String?
+  // Snapshot of the mission in progress; kept even if the source Mission changes.
+  activeMissionContent         String?
+  activeMissionType            MissionType?
+  activeMissionDurationSeconds Int?
+  activeMissionStartedAt       DateTime?
+  activeMissionStage           MissionStage?
+  // New UUID each time a mission enters AWAITING_VOTE; MissionVote rows belong to it.
+  activeMissionVoteRoundId     String?
+  // Why the current player is waiting for the penalty roulette; null when not waiting.
+  activePenaltySource          PenaltySource?
+  // Set while an end-game vote pauses the game; GameEndVote rows belong to the round id.
+  activeEndVoteRoundId         String?
+  activeEndVoteStartedAt       DateTime?
+  createdAt                    DateTime       @default(now())
+  updatedAt                    DateTime       @updatedAt
+  // Last player activity (join, reconnect, content edit, game action, vote, kick);
+  // RoomCleanupService removes rooms left idle past the TTL for their status.
+  lastActivityAt               DateTime       @default(now())
+  players                      Player[]
+  questions                    Question[]
+  missions                     Mission[]
+  missionVotes                 MissionVote[]
+  penalties                    Penalty[]
+  gameEndVotes                 GameEndVote[]
+}
+
+model GameEndVote {
+  id          String        @id @default(uuid())
+  roomId      String
+  voteRoundId String
+  voterId     String
+  choice      EndVoteChoice
+  createdAt   DateTime      @default(now())
+  room        Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  voter       Player        @relation(fields: [voterId], references: [id], onDelete: Cascade)
+
+  @@unique([voteRoundId, voterId])
+}
+
+model Penalty {
+  id        String   @id @default(uuid())
+  roomId    String
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+}
+
+model MissionVote {
+  id          String            @id @default(uuid())
+  roomId      String
+  voteRoundId String
+  voterId     String
+  choice      MissionVoteChoice
+  createdAt   DateTime          @default(now())
+  room        Room              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  voter       Player            @relation(fields: [voterId], references: [id], onDelete: Cascade)
+
+  @@unique([voteRoundId, voterId])
+}
+
+model Mission {
+  id              String      @id @default(uuid())
+  roomId          String
+  content         String
+  type            MissionType
+  durationSeconds Int?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  room            Room        @relation(fields: [roomId], references: [id], onDelete: Cascade)
+}
+
+model Question {
+  id        String   @id @default(uuid())
+  roomId    String
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+}
+
+model Player {
+  id                 String        @id @default(uuid())
+  roomId             String
+  nickname           String
+  displayName        String
+  isHost             Boolean       @default(false)
+  turnOrder          Int?
+  position           Int           @default(0)
+  accumulatedDrinks  Int           @default(0)
+  reconnectTokenHash String?       @unique
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  room               Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  missionVotes       MissionVote[]
+  gameEndVotes       GameEndVote[]
+
+  @@unique([roomId, displayName])
+}
