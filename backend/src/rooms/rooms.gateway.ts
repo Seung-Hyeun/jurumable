@@ -103,7 +103,6 @@ type QaSelectResult =
       random: boolean;
       direct: boolean;
     }
-  | { ok: true; empty: true }
   | AckError;
 
 const QA_SELECT_ERRORS = {
@@ -111,6 +110,7 @@ const QA_SELECT_ERRORS = {
   NOT_YOUR_TURN: 'It is not your turn',
   QA_NOT_SELECTING: 'No Q&A question is being chosen',
   QUESTION_NOT_FOUND: 'Question not found',
+  NO_QUESTIONS: 'No questions are registered to draw from',
   GAME_PAUSED,
 };
 
@@ -480,7 +480,7 @@ export class RoomsGateway
       if (!result.ok) {
         return ackError(result.code, ROLL_ERRORS[result.code]);
       }
-      const { playerId: rollerId, displayName, qaReady, qaEmpty } = result;
+      const { playerId: rollerId, displayName, qaReady } = result;
       const { mission, missionEmpty, penaltyReady, penaltyEmpty } = result;
       const { dice, fromPosition, toPosition, tile, effect } = result;
       const broadcast = this.server.to(roomChannel(roomCode));
@@ -502,8 +502,6 @@ export class RoomsGateway
       } else if (qaReady) {
         // The question selection opens; game:qa-selected follows with the question.
         broadcast.emit('game:qa', { playerId: rollerId, displayName });
-      } else if (qaEmpty) {
-        broadcast.emit('game:qa-empty', { playerId: rollerId, displayName });
       } else if (mission) {
         broadcast.emit('game:mission', {
           playerId: rollerId,
@@ -555,11 +553,7 @@ export class RoomsGateway
         toPosition,
         tile,
         autoResolved:
-          effect !== null ||
-          qaEmpty ||
-          missionEmpty ||
-          penaltyEmpty ||
-          targetEmpty,
+          effect !== null || missionEmpty || penaltyEmpty || targetEmpty,
       };
     } catch (error) {
       this.logger.error('Failed to roll dice', errorTrace(error));
@@ -619,11 +613,6 @@ export class RoomsGateway
         playerId: result.playerId,
         displayName: result.displayName,
       };
-      if (result.empty) {
-        broadcast.emit('game:qa-empty', who);
-        await this.broadcastRoomState(roomCode);
-        return { ok: true, empty: true };
-      }
       broadcast.emit('game:qa-selected', {
         ...who,
         question: result.question,

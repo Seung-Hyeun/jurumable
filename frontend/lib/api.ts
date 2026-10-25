@@ -260,11 +260,9 @@ export type QaCompleteAck =
   | { ok: true }
   | { ok: false; code: string; message: string };
 
-// `game:qa-select` / `game:qa-random` / `game:qa-direct`; empty: every question was gone, so the
-// tile was skipped.
+// `game:qa-select` / `game:qa-random` / `game:qa-direct` (NO_QUESTIONS: nothing to draw from).
 export type QaSelectAck =
   | { ok: true; question: { id: string | null; content: string }; random: boolean; direct: boolean }
-  | { ok: true; empty: true }
   | { ok: false; code: string; message: string };
 
 // On success the backend also sends targetPlayer, or empty: true when the tile was skipped.

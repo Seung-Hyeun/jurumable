@@ -909,11 +909,10 @@ export class RoomsService {
         },
       });
 
-      // A QA tile only opens the question selection here; the question is picked by the
-      // current player (or at random on request) in selectQuestion.
-      const qaReady =
-        tile.type === TileType.QA &&
-        (await tx.question.count({ where: { roomId } })) > 0;
+      // A QA tile only opens the question selection here (also with no questions registered:
+      // a player or a viewer can still ask one live); the current player settles it in
+      // selectQuestion.
+      const qaReady = tile.type === TileType.QA;
       let mission: {
         content: string;
         type: MissionType;
@@ -945,12 +944,11 @@ export class RoomsService {
       const penaltyReady =
         tile.type === TileType.PENALTY &&
         (await tx.penalty.count({ where: { roomId } })) > 0;
-      // QA / MISSION / PENALTY tiles with nothing registered are skipped so the game never stalls.
-      const qaEmpty = tile.type === TileType.QA && !qaReady;
+      // MISSION / PENALTY tiles with nothing registered are skipped so the game never stalls.
       const missionEmpty = tile.type === TileType.MISSION && !mission;
       const penaltyEmpty = tile.type === TileType.PENALTY && !penaltyReady;
 
-      if (auto || qaEmpty || missionEmpty || penaltyEmpty) {
+      if (auto || missionEmpty || penaltyEmpty) {
         await this.advanceTurn(tx, roomId, player.turnOrder);
       } else {
         await tx.room.update({
@@ -977,7 +975,6 @@ export class RoomsService {
         tile,
         effect: auto?.effect ?? null,
         qaReady,
-        qaEmpty,
         mission,
         missionEmpty,
         penaltyReady,
@@ -1744,14 +1741,8 @@ export class RoomsService {
           orderBy: { createdAt: 'asc' },
         });
         if (questions.length === 0) {
-          // Everything was deleted while choosing; skip the tile, as on landing.
-          await this.advanceTurn(tx, roomId, player.turnOrder);
-          return {
-            ok: true as const,
-            empty: true as const,
-            playerId: player.id,
-            displayName: player.displayName,
-          };
+          // Nothing to draw from; the choice stays open (직접 질문 is still possible).
+          return { ok: false as const, code: 'NO_QUESTIONS' as const };
         }
         question = questions[randomInt(questions.length)];
       } else {
@@ -1774,7 +1765,6 @@ export class RoomsService {
       });
       return {
         ok: true as const,
-        empty: false as const,
         playerId: player.id,
         displayName: player.displayName,
         question,

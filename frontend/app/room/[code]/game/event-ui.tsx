@@ -46,3 +46,56 @@ export function EventHeader({
     </>
   );
 }
+
+// The frames of a roulette that lands on the server's result: the candidates (the room's list)
+// in order for show, the last frame always the result the server already picked and stored.
+// Nothing here chooses anything.
+export function rouletteFrames(candidates: string[], result: string, count: number) {
+  const list = candidates.length > 0 ? candidates : [result];
+  const at = Math.max(0, list.indexOf(result));
+  return Array.from({ length: count }, (_, i) =>
+    i === count - 1 ? result : list[(at - (count - 1 - i) + list.length * count) % list.length],
+  );
+}
+
+// The penalty roulette and the random Q&A question: candidates flick by, slowing down, and stop
+// on the result. The flicking text is hidden from screen readers; the result is not.
+export function Roulette({
+  id,
+  tone,
+  icon,
+  label,
+  title,
+  note,
+  frame,
+  stopped,
+  doneText,
+}: {
+  id: string;
+  tone: ComponentProps<typeof Badge>["tone"];
+  icon: string;
+  label: string;
+  title: string;
+  note: string;
+  frame: string;
+  stopped: boolean;
+  doneText: string;
+}) {
+  return (
+    <section aria-labelledby={id} className="flex w-full flex-col items-center gap-3">
+      <EventHeader id={id} tone={tone} icon={icon} label={label}>
+        {title}
+      </EventHeader>
+      <p className="text-sm font-bold text-zinc-600 dark:text-zinc-400">{note}</p>
+      <div
+        aria-hidden={!stopped}
+        className={`flex min-h-24 w-full max-w-xs items-center justify-center rounded-2xl px-4 py-3 text-center font-black whitespace-pre-wrap wrap-anywhere ring-2 motion-safe:transition-colors ${stopped ? "bg-rose-50 dark:bg-rose-500/10 text-rose-800 dark:text-rose-200 ring-rose-300 dark:ring-rose-400/50" : "bg-white dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 ring-zinc-200 dark:ring-zinc-700"}`}
+      >
+        {frame}
+      </div>
+      <p className="font-semibold text-violet-700 dark:text-violet-300">
+        {stopped ? doneText : "룰렛이 돌아가는 중..."}
+      </p>
+    </section>
+  );
+}

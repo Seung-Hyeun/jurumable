@@ -16,6 +16,7 @@ const QA_SELECT_ERRORS: Record<string, string> = {
   NOT_YOUR_TURN: "현재 내 차례가 아닙니다.",
   QA_NOT_SELECTING: "이미 질문이 정해졌습니다.",
   QUESTION_NOT_FOUND: "삭제된 질문입니다. 목록에서 다시 골라주세요.",
+  NO_QUESTIONS: "등록된 질문이 없습니다. 직접 질문 받기를 이용해주세요.",
   GAME_PAUSED: "게임 종료 투표 중에는 고를 수 없습니다.",
   GAME_NOT_PLAYING: "게임이 진행 중이 아닙니다.",
 };
@@ -57,8 +58,9 @@ function useQaChoice(socketRef: RefObject<Socket | null>) {
   return { choose, pending, error };
 }
 
-// The QA tile before a question is chosen. Everyone sees whose Q&A it is; the list to choose
-// from (where anyone can add a question, e.g. one a viewer suggested) is QaQuestionPicker.
+// The QA tile before the question is settled. A player or a viewer asking live (직접 질문 받기) is
+// the main way; a random question from the room's list is for when nobody has one. Everyone sees
+// whose Q&A it is; only the current player decides (QaChoiceButtons).
 export function QaSelectPrompt({
   performer,
   isPerformer,
@@ -70,16 +72,18 @@ export function QaSelectPrompt({
 }) {
   return (
     <section aria-labelledby="qa-select-title" className="flex w-full flex-col items-center gap-3">
-      <EventHeader id="qa-select-title" tone="primary" icon="❓" label="Q&A 질문 선택">
+      <EventHeader id="qa-select-title" tone="primary" icon="❓" label="Q&A">
         {performer.displayName}님의 Q&A
       </EventHeader>
       <p className="font-semibold text-violet-700 dark:text-violet-300">
         {isPerformer
-          ? "아래 목록에서 질문을 고르거나 랜덤으로 결정하세요."
-          : `${performer.displayName}님이 질문을 고르는 중입니다.`}
+          ? "시청자나 참가자가 직접 질문해도 됩니다."
+          : `${performer.displayName}님이 질문 방식을 고르는 중입니다.`}
       </p>
       <p className="text-sm text-zinc-600 dark:text-zinc-400">
-        참가자나 시청자가 직접 질문할 수도 있습니다.
+        {isPerformer
+          ? "질문할 사람이 없으면 랜덤 질문을 뽑으세요."
+          : "시청자나 참가자가 직접 질문해도 됩니다."}
       </p>
       {paused && <p className={CALLOUT}>게임 종료 투표가 진행 중입니다.</p>}
       {!performer.isOnline && (
@@ -89,16 +93,23 @@ export function QaSelectPrompt({
   );
 }
 
-// Only the current player gets these: the server picks one of the room's questions at random,
-// or the list is skipped because a player or a viewer asks the question live.
+// Only the current player gets these. 직접 질문 받기: no question from the app, someone asks
+// live and the answer ends with 답변 완료. 랜덤 질문 뽑기: the server picks one of the room's
+// questions. The room's list itself is a small extra (등록된 질문에서 고르기).
 export function QaChoiceButtons({
   socketRef,
   connected,
   paused,
+  hasQuestions,
+  pickerOpen,
+  onTogglePicker,
 }: {
   socketRef: RefObject<Socket | null>;
   connected: boolean;
   paused: boolean;
+  hasQuestions: boolean;
+  pickerOpen: boolean;
+  onTogglePicker: () => void;
 }) {
   const { choose, pending, error } = useQaChoice(socketRef);
   const disabled = !connected || paused || pending !== null;
@@ -106,47 +117,55 @@ export function QaChoiceButtons({
     <div className="flex w-full max-w-xs flex-col gap-2">
       <button
         type="button"
-        onClick={() => choose("random")}
+        onClick={() => choose("direct")}
         disabled={disabled}
-        aria-describedby="qa-random-hint"
+        aria-describedby="qa-choice-hint"
         className={primaryButton}
       >
-        {pending === "random" ? "정하는 중..." : "랜덤으로 결정"}
+        <span aria-hidden="true">💬 </span>
+        {pending === "direct" ? "시작하는 중..." : "직접 질문 받기"}
       </button>
       <button
         type="button"
-        onClick={() => choose("direct")}
-        disabled={disabled}
-        aria-describedby="qa-direct-hint"
+        onClick={() => choose("random")}
+        disabled={disabled || !hasQuestions}
+        aria-describedby="qa-choice-hint"
         className={secondaryButton}
       >
-        {pending === "direct" ? "넘어가는 중..." : "직접 질문할게요"}
+        <span aria-hidden="true">🎲 </span>
+        {pending === "random" ? "뽑는 중..." : "랜덤 질문 뽑기"}
       </button>
-      <p id="qa-random-hint" className="text-sm text-zinc-600 dark:text-zinc-400">
+      <p id="qa-choice-hint" className="text-sm text-zinc-600 dark:text-zinc-400">
         {paused
           ? "게임 종료 투표가 끝나면 고를 수 있습니다."
           : !connected
             ? "서버와 다시 연결되면 고를 수 있습니다."
-            : "질문을 정하지 못했다면 서버가 목록에서 하나를 뽑습니다."}
-      </p>
-      <p id="qa-direct-hint" className="text-sm text-zinc-600 dark:text-zinc-400">
-        다른 참가자나 시청자가 직접 질문할 경우 이 단계를 넘어갈 수 있습니다.
+            : hasQuestions
+              ? "질문은 앱에 입력하지 않아도 됩니다. 말로 받은 질문에 답하면 됩니다."
+              : "등록된 질문이 없습니다. 직접 질문 받기를 이용해주세요."}
       </p>
       <FormError message={error} />
+      <button
+        type="button"
+        onClick={onTogglePicker}
+        aria-expanded={pickerOpen}
+        aria-controls="qa-pick"
+        className="self-center rounded-lg px-2 py-1 text-sm font-bold text-violet-700 dark:text-violet-300 hover:bg-violet-50 dark:hover:bg-violet-500/10 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-violet-200"
+      >
+        등록된 질문에서 고르기 {pickerOpen ? "▲" : "▼"}
+      </button>
     </div>
   );
 }
 
-// The room's questions with the usual add / edit / delete for everyone; the current player also
-// gets "이 질문으로 하기" on each. Shown under the board while the question is being chosen.
+// 등록된 질문에서 고르기: the room's questions for the current player, with "이 질문으로 하기" on each
+// (and the usual add / edit / delete). Shown under the board, only when opened.
 export function QaQuestionPicker({
   questions,
   loadFailed,
   client,
   onPatch,
   onUnauthorized,
-  performerName,
-  isPerformer,
   socketRef,
   connected,
   paused,
@@ -156,28 +175,22 @@ export function QaQuestionPicker({
   client: RoomClient;
   onPatch: (update: (list: ContentItem[]) => ContentItem[]) => void;
   onUnauthorized: () => void;
-  performerName: string;
-  isPerformer: boolean;
   socketRef: RefObject<Socket | null>;
   connected: boolean;
   paused: boolean;
 }) {
   const { choose, pending, error } = useQaChoice(socketRef);
   return (
-    <section aria-labelledby="qa-pick-title" className={cardClass}>
+    <section id="qa-pick" aria-labelledby="qa-pick-title" className={cardClass}>
       <h2 id="qa-pick-title" className="text-lg font-bold">
-        Q&A 질문 목록
+        등록된 질문에서 고르기
       </h2>
       <p className="mt-1 mb-3 text-sm text-zinc-600 dark:text-zinc-400">
-        {isPerformer
-          ? "질문을 골라 '이 질문으로 하기'를 누르세요."
-          : `질문은 누구나 추가·수정할 수 있습니다. 최종 선택은 ${performerName}님이 합니다.`}
+        질문을 골라 &apos;이 질문으로 하기&apos;를 누르세요.
       </p>
-      {isPerformer && (
-        <div className="mb-3 empty:hidden">
-          <FormError message={error} />
-        </div>
-      )}
+      <div className="mb-3 empty:hidden">
+        <FormError message={error} />
+      </div>
       <ContentPanel
         standalone
         kind="questions"
@@ -186,16 +199,12 @@ export function QaQuestionPicker({
         client={client}
         onPatch={onPatch}
         onUnauthorized={onUnauthorized}
-        pick={
-          isPerformer
-            ? {
-                label: "이 질문으로 하기",
-                pendingId: pending,
-                disabled: !connected || paused || pending !== null,
-                onPick: (item) => choose(item.id),
-              }
-            : undefined
-        }
+        pick={{
+          label: "이 질문으로 하기",
+          pendingId: pending,
+          disabled: !connected || paused || pending !== null,
+          onPick: (item) => choose(item.id),
+        }}
       />
     </section>
   );
@@ -223,15 +232,20 @@ export function QaPrompt({
         {performer.displayName}님의 질문
       </EventHeader>
       {direct ? (
-        <p className={`${EVENT_CONTENT} text-xl`}>직접 질문 진행 중</p>
+        <div className={`${EVENT_CONTENT} text-center`}>
+          <p className="text-xl">💬 직접 질문 진행 중</p>
+          <p className="mt-1 text-base font-semibold text-zinc-600 dark:text-zinc-400">
+            다른 참가자나 시청자가 자유롭게 질문해주세요.
+          </p>
+        </div>
       ) : (
         <p className={`${EVENT_CONTENT} ${contentSize(question)}`}>“{question}”</p>
       )}
       <p className="font-semibold text-violet-700 dark:text-violet-300">
         {direct
           ? isPerformer
-            ? "참가자나 시청자의 질문에 답한 뒤 답변 완료를 누르세요."
-            : `참가자나 시청자가 질문하고 ${performer.displayName}님이 답합니다.`
+            ? "질문에 답한 뒤 답변 완료를 누르세요."
+            : `${performer.displayName}님이 질문에 답변하고 있습니다.`
           : isPerformer
             ? "내 질문입니다."
             : `${performer.displayName}님의 답변을 기다리는 중...`}

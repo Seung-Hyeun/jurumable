@@ -14,6 +14,7 @@ import type {
   PenaltyResult,
   PenaltyStarted,
   QaCompleted,
+  QaSelected,
   Question,
   RollAck,
   RoomStatePayload,
@@ -50,11 +51,11 @@ import {
 import type { ContentItem } from "../content-panel";
 import { useRoom } from "../use-room";
 import { EndVoteOverlay, GameEnded } from "./end-vote-panel";
-import { CALLOUT, contentSize } from "./event-ui";
+import { CALLOUT, Roulette, contentSize, rouletteFrames } from "./event-ui";
 import { Die, GameBoard, PlayerToken } from "./game-board";
 import { HistoryPanel, type RollLogEntry } from "./history-panel";
 import { MissionAction, MissionPrompt, MissionVote } from "./mission-panel";
-import { PenaltyPrompt, PenaltyRoulette, PenaltySpin, rouletteFrames } from "./penalty-panel";
+import { PenaltyPrompt, PenaltySpin } from "./penalty-panel";
 import {
   QaChoiceButtons,
   QaCompleteButton,
@@ -71,7 +72,6 @@ const PHASE_LABEL: Record<TurnPhase, string> = {
 
 // The backend skips a manual tile, and moves the turn on, when there is nothing to play.
 const SKIPPED = {
-  qa: "등록된 Q&A가 없어 이번 칸은 넘어갑니다.",
   mission: "등록된 미션이 없어 이번 칸은 넘어갑니다.",
   penalty: "등록된 벌칙이 없어 이번 벌칙은 넘어갑니다.",
   failedPenalty: "등록된 벌칙이 없어 미션 실패 벌칙을 넘어갑니다.",
@@ -188,12 +188,26 @@ function duringShow(show: RollShow, state: RoomStatePayload): RoomStatePayload {
   };
 }
 
-// The penalty roulette: penalties flick by, slowing down, and stop on the server's result
-// (already picked and stored; the turn has already moved on). Like a roll it holds back the turn
-// and the history until it has stopped, and plays only with motion allowed.
-type SpinShow = { result: PenaltyResult; tick: number; base: RoomStatePayload | null };
-const SPIN_FRAMES = 13;
-const spinDelay = (tick: number) => (tick === SPIN_FRAMES - 1 ? 700 : 50 + tick * 13); // ~1.7 s, then the result
+// The penalty roulette and the random Q&A question: the room's list flicks by, slowing down, and
+// stops on the server's result (already picked and stored). Like a roll it holds back the turn,
+// the event and the history until it has stopped, and plays only with motion allowed.
+// `candidates` is the list as it was when the result came in.
+type SpinShow = {
+  kind: "penalty" | "qa";
+  title: string;
+  note: string;
+  result: string;
+  candidates: string[];
+  tick: number;
+  base: RoomStatePayload | null;
+};
+
+// How long each frame stays, in ms: fast, then slower, then slowest; the last one is the result,
+// held a moment. Penalty: about 3.4 s before it stops. Q&A: about 1.9 s.
+const SPIN_DELAYS: Record<SpinShow["kind"], number[]> = {
+  penalty: [...Array<number>(9).fill(110), 180, 200, 220, 240, 260, 320, 420, 520, 900],
+  qa: [...Array<number>(6).fill(100), 160, 200, 250, 320, 400, 800],
+};
 
 function duringSpin(spin: SpinShow, state: RoomStatePayload): RoomStatePayload {
   const base = spin.base ?? state;
@@ -280,8 +294,12 @@ export default function GameScreen({ code }: { code: string }) {
   const [penalties, setPenalties] = useState<Penalty[]>([]);
   // The roll being shown (see RollShow); null when nothing is held back.
   const [show, setShow] = useState<RollShow | null>(null);
-  // The penalty roulette being shown (see SpinShow).
+  // The penalty roulette / random Q&A question being shown (see SpinShow).
   const [spin, setSpin] = useState<SpinShow | null>(null);
+  // The current player has opened 등록된 질문에서 고르기 during a Q&A choice.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  // The question / penalty texts the roulettes flick through (kept in step with the lists).
+  const lists = useRef<{ questions: string[]; penalties: string[] }>({ questions: [], penalties: [] });
   // 게임 기록: the latest rolls this screen has seen, newest first (not stored by the backend).
   const [log, setLog] = useState<RollLogEntry[]>([]);
   const rollSeq = useRef(0);
@@ -365,8 +383,27 @@ export default function GameScreen({ code }: { code: string }) {
     });
     // The Q&A, 지목 and mission screens come from room:state.activeEvent (also after a
     // refresh), so these start signals only clear the previous message.
-    s.on("game:qa", () => setNotice(null));
-    s.on("game:qa-selected", () => setNotice(null));
+    // A new choice starts with the registered list folded away.
+    s.on("game:qa", () => {
+      setNotice(null);
+      setPickerOpen(false);
+    });
+    // A random question rolls in like the penalty roulette (the server already picked it).
+    s.on("game:qa-selected", (payload: QaSelected) => {
+      setNotice(null);
+      setPickerOpen(false);
+      if (payload.random && motionAllowed()) {
+        setSpin({
+          kind: "qa",
+          title: `${payload.displayName}님의 질문`,
+          note: "랜덤 질문",
+          result: payload.question.content,
+          candidates: lists.current.questions,
+          tick: 0,
+          base: latest.current,
+        });
+      }
+    });
     s.on("game:target-required", () => setNotice(null));
     s.on("game:mission", () => setNotice(null));
     s.on("room:state", (payload: RoomStatePayload) => {
@@ -409,7 +446,6 @@ export default function GameScreen({ code }: { code: string }) {
         ),
       );
     });
-    s.on("game:qa-empty", () => setNotice({ text: SKIPPED.qa }));
     s.on("game:mission-empty", () => setNotice({ text: SKIPPED.mission }));
     s.on("game:penalty-empty", (payload: PenaltyStarted) =>
       setNotice(
@@ -430,7 +466,19 @@ export default function GameScreen({ code }: { code: string }) {
           durationSeconds: penalty.durationSeconds,
         },
       });
-      setSpin(motionAllowed() ? { result: payload, tick: 0, base: latest.current } : null);
+      setSpin(
+        motionAllowed()
+          ? {
+              kind: "penalty",
+              title: `${displayName ?? ""}님의 벌칙`,
+              note: source === "MISSION_FAILURE" ? "미션 실패 벌칙" : "벌칙 칸 결과",
+              result: penalty.content,
+              candidates: lists.current.penalties,
+              tick: 0,
+              base: latest.current,
+            }
+          : null,
+      );
     });
     s.on("game:target-empty", () => setNotice({ text: SKIPPED.target }));
     // Only voted / total while the end-game vote runs. Only the request sends voted 0, so that
@@ -491,15 +539,24 @@ export default function GameScreen({ code }: { code: string }) {
     if (!spin) {
       return;
     }
+    const delays = SPIN_DELAYS[spin.kind];
     const timer = window.setTimeout(
       () =>
         setSpin((current) =>
-          current && current.tick + 1 < SPIN_FRAMES ? { ...current, tick: current.tick + 1 } : null,
+          current && current.tick + 1 < delays.length ? { ...current, tick: current.tick + 1 } : null,
         ),
-      spinDelay(spin.tick),
+      delays[spin.tick],
     );
     return () => window.clearTimeout(timer);
   }, [spin]);
+
+  // The lists the roulettes flick through, read when a result comes in.
+  useEffect(() => {
+    lists.current = {
+      questions: questions?.map((question) => question.content) ?? [],
+      penalties: penalties.map((penalty) => penalty.content),
+    };
+  }, [questions, penalties]);
 
   function roll() {
     const socket = socketRef.current;
@@ -805,18 +862,21 @@ export default function GameScreen({ code }: { code: string }) {
                     )}
                   </div>
                 ) : spin ? (
-                <PenaltyRoulette
-                  performerName={spin.result.displayName ?? ""}
-                  label={spin.result.source === "MISSION_FAILURE" ? "미션 실패 벌칙" : "벌칙 칸 결과"}
-                  frame={
-                    rouletteFrames(
-                      penalties.map((penalty) => penalty.content),
-                      spin.result.penalty.content,
-                      SPIN_FRAMES,
-                    )[spin.tick]
-                  }
-                  stopped={spin.tick === SPIN_FRAMES - 1}
-                />
+                  <Roulette
+                    id="roulette-title"
+                    tone={spin.kind === "qa" ? "primary" : "danger"}
+                    icon={spin.kind === "qa" ? "🎲" : "🎡"}
+                    label={spin.kind === "qa" ? "랜덤 질문" : "벌칙 룰렛"}
+                    title={spin.title}
+                    note={spin.note}
+                    frame={
+                      rouletteFrames(spin.candidates, spin.result, SPIN_DELAYS[spin.kind].length)[
+                        spin.tick
+                      ]
+                    }
+                    stopped={spin.tick === SPIN_DELAYS[spin.kind].length - 1}
+                    doneText={spin.kind === "qa" ? "질문이 정해졌습니다!" : "벌칙이 정해졌습니다!"}
+                  />
               ) : qaSelecting && qaSelectingPerformer ? (
                   <QaSelectPrompt
                     performer={qaSelectingPerformer}
@@ -949,12 +1009,15 @@ export default function GameScreen({ code }: { code: string }) {
                 )}
               </div>
               {show || spin ? null : qaSelecting ? (
-                // Only the current player decides; everyone may still add questions to the list.
+                // Only the current player decides.
                 qaSelecting.playerId === view.playerId && (
                   <QaChoiceButtons
                     socketRef={socketRef}
                     connected={connection === "connected"}
                     paused={paused}
+                    hasQuestions={(questions?.length ?? 0) > 0}
+                    pickerOpen={pickerOpen}
+                    onTogglePicker={() => setPickerOpen((open) => !open)}
                   />
                 )
               ) : qa && current ? (
@@ -1026,15 +1089,13 @@ export default function GameScreen({ code }: { code: string }) {
               )}
             </div>
           </GameBoard>
-          {qaSelecting && qaSelectingPerformer && (
+          {qaSelecting && qaSelecting.playerId === view.playerId && pickerOpen && (
             <QaQuestionPicker
               questions={questions}
               loadFailed={questionsFailed}
               client={view.client}
               onPatch={patchQuestions}
               onUnauthorized={expireSession}
-              performerName={qaSelectingPerformer.displayName}
-              isPerformer={qaSelecting.playerId === view.playerId}
               socketRef={socketRef}
               connected={connection === "connected"}
               paused={paused}
