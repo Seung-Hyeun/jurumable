@@ -217,137 +217,132 @@ export default function RoomLobby({ code }: { code: string }) {
         <ConnectionNotice connection={connection} onRetry={retryLobby} />
       </div>
 
-      {/* Phones: one column. Desktop: room + players + start | contents.
-          grid-cols-1 (minmax(0, 1fr)) keeps long nicknames truncating instead of widening the page. */}
-      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:grid-rows-[auto_auto_1fr] lg:items-start">
-        <section
-          aria-labelledby="room-code-title"
-          className={`${cardClass} lg:col-start-1 lg:row-start-1`}
-        >
-          <div className="flex items-center justify-between gap-3">
-            <h2 id="room-code-title" className="text-sm font-bold text-zinc-500 dark:text-zinc-400">
-              방 코드
-            </h2>
-            <Badge tone="primary">{STATUS_LABEL[room.status]}</Badge>
-          </div>
-          <p className="mt-1 font-mono text-4xl font-black tracking-[0.25em] text-zinc-900 dark:text-zinc-100">
-            {room.code}
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <ShareActions code={room.code} invite onMessage={showMessage} />
-          </div>
-          <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-            친구들에게 방 코드나 초대 링크를 보내주세요.
-          </p>
-        </section>
-
-        <section
-          aria-labelledby="players-title"
-          className={`${cardClass} lg:col-start-1 lg:row-start-2`}
-        >
-          <div className="flex items-baseline justify-between gap-3">
-            <h2 id="players-title" className="text-lg font-bold">
-              참가자
-            </h2>
-            <p className="text-sm text-zinc-600 dark:text-zinc-400">
-              현재 인원{" "}
-              <span className="font-bold text-zinc-900 dark:text-zinc-100 tabular-nums">
-                {players.length} / {room.maxPlayers}
-              </span>
-            </p>
-          </div>
-          <ul className="mt-4 flex flex-col gap-2">
-            {players.map((player) => {
-              const kickable =
-                isHost &&
-                player.id !== view.playerId &&
-                !player.isHost &&
-                !player.isOnline;
-              return (
-                <li
-                  key={player.id}
-                  className="flex items-center justify-between gap-3 rounded-2xl bg-zinc-50 dark:bg-zinc-800/60 px-4 py-3"
-                >
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="truncate text-lg font-bold" title={player.displayName}>
-                      {player.displayName}
-                    </span>
-                    <PlayerBadges isMe={player.id === view.playerId} isHost={player.isHost} />
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <OnlineBadge online={player.isOnline} />
-                    {kickable && (
-                      <button
-                        type="button"
-                        onClick={() => kickPlayer(player)}
-                        disabled={kickingId !== null}
-                        aria-label={`${player.displayName} 강퇴`}
-                        className={smallDangerButton}
-                      >
-                        {kickingId === player.id ? "내보내는 중..." : "강퇴"}
-                      </button>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-          {kickError && (
-            <div className="mt-3">
-              <FormError message={kickError} />
+      {/* Phones and tablets: one column (room, players, start, board, then the contents).
+          Desktop: room + players + start | the board, and the contents under both at full width.
+          grid-cols-1 / minmax(0, …) keep long nicknames truncating instead of widening the page. */}
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(18rem,1fr)_minmax(0,2fr)] lg:items-start">
+        <div className="flex min-w-0 flex-col gap-4">
+          <section aria-labelledby="room-code-title" className={cardClass}>
+            <div className="flex items-center justify-between gap-3">
+              <h2 id="room-code-title" className="text-sm font-bold text-zinc-500 dark:text-zinc-400">
+                방 코드
+              </h2>
+              <Badge tone="primary">{STATUS_LABEL[room.status]}</Badge>
             </div>
-          )}
-        </section>
+            <p className="mt-1 font-mono text-4xl font-black tracking-[0.25em] text-zinc-900 dark:text-zinc-100">
+              {room.code}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <ShareActions code={room.code} invite onMessage={showMessage} />
+            </div>
+            <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+              친구들에게 방 코드나 초대 링크를 보내주세요.
+            </p>
+          </section>
 
-        <div className="lg:col-start-2 lg:row-span-3 lg:row-start-1">
-          <ContentTabs
-            contents={contents}
-            loadFailed={contentsFailed}
-            client={view.client}
-            onPatch={patchContents}
-            onUnauthorized={expireSession}
-          />
+          <section aria-labelledby="players-title" className={cardClass}>
+            <div className="flex items-baseline justify-between gap-3">
+              <h2 id="players-title" className="text-lg font-bold">
+                참가자
+              </h2>
+              <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                현재 인원{" "}
+                <span className="font-bold text-zinc-900 dark:text-zinc-100 tabular-nums">
+                  {players.length} / {room.maxPlayers}
+                </span>
+              </p>
+            </div>
+            <ul className="mt-4 flex flex-col gap-2">
+              {players.map((player) => {
+                const kickable =
+                  isHost &&
+                  player.id !== view.playerId &&
+                  !player.isHost &&
+                  !player.isOnline;
+                return (
+                  <li
+                    key={player.id}
+                    className="flex items-center justify-between gap-3 rounded-2xl bg-zinc-50 dark:bg-zinc-800/60 px-4 py-3"
+                  >
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-lg font-bold" title={player.displayName}>
+                        {player.displayName}
+                      </span>
+                      <PlayerBadges isMe={player.id === view.playerId} isHost={player.isHost} />
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <OnlineBadge online={player.isOnline} />
+                      {kickable && (
+                        <button
+                          type="button"
+                          onClick={() => kickPlayer(player)}
+                          disabled={kickingId !== null}
+                          aria-label={`${player.displayName} 강퇴`}
+                          className={smallDangerButton}
+                        >
+                          {kickingId === player.id ? "내보내는 중..." : "강퇴"}
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            {kickError && (
+              <div className="mt-3">
+                <FormError message={kickError} />
+              </div>
+            )}
+          </section>
+
+          <section className="flex flex-col gap-3">
+            {isHost ? (
+              <>
+                <button
+                  type="button"
+                  onClick={startGame}
+                  disabled={!canStart}
+                  aria-describedby="start-hint"
+                  className={primaryButton}
+                >
+                  {starting ? "시작하는 중..." : "게임 시작"}
+                </button>
+                <p id="start-hint" className="text-center text-base text-zinc-600 dark:text-zinc-400">
+                  {startBlockedBy ?? "모두 모였다면 게임을 시작하세요."}
+                </p>
+                <FormError message={startError} />
+              </>
+            ) : (
+              <p className="rounded-2xl bg-white/80 dark:bg-zinc-900/80 px-4 py-4 text-center text-base text-zinc-600 dark:text-zinc-400">
+                방장이 게임을 시작할 때까지 기다려주세요.
+              </p>
+            )}
+            <LeaveRoomButton
+              socketRef={socketRef}
+              connected={connection === "connected"}
+              playing={false}
+              className="mt-2 items-center"
+            />
+          </section>
         </div>
 
-        <section className="flex flex-col gap-3 lg:col-start-1 lg:row-start-3">
-          {isHost ? (
-            <>
-              <button
-                type="button"
-                onClick={startGame}
-                disabled={!canStart}
-                aria-describedby="start-hint"
-                className={primaryButton}
-              >
-                {starting ? "시작하는 중..." : "게임 시작"}
-              </button>
-              <p id="start-hint" className="text-center text-base text-zinc-600 dark:text-zinc-400">
-                {startBlockedBy ?? "모두 모였다면 게임을 시작하세요."}
-              </p>
-              <FormError message={startError} />
-            </>
-          ) : (
-            <p className="rounded-2xl bg-white/80 dark:bg-zinc-900/80 px-4 py-4 text-center text-base text-zinc-600 dark:text-zinc-400">
-              방장이 게임을 시작할 때까지 기다려주세요.
-            </p>
-          )}
-          <LeaveRoomButton
-            socketRef={socketRef}
-            connected={connection === "connected"}
-            playing={false}
-            className="mt-2 items-center"
-          />
-        </section>
-      </div>
-
-      {/* The board this room will play with; the host can change tiles before the start.
-          An older backend (for a moment during a deploy) sends no board: the default one. */}
-      <div className="mt-4">
+        {/* The board this room will play with; the host can change tiles before the start.
+            An older backend (for a moment during a deploy) sends no board: the default one. */}
         <BoardPanel
           board={state.board ?? DEFAULT_BOARD}
           isHost={isHost}
           socketRef={socketRef}
           connected={connection === "connected"}
+        />
+      </div>
+
+      <div className="mt-4">
+        <ContentTabs
+          contents={contents}
+          loadFailed={contentsFailed}
+          client={view.client}
+          onPatch={patchContents}
+          onUnauthorized={expireSession}
         />
       </div>
       {/* Same fixed message area as the game screen; it never takes a tap. */}

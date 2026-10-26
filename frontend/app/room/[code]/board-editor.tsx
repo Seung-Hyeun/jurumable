@@ -88,10 +88,18 @@ export function BoardPanel({
 
   return (
     <section aria-labelledby="board-title" className={cardClass}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 id="board-title" className="text-lg font-bold">
-          보드
-        </h2>
+      {/* The title and what can be done on the left; the host's 보드 편집 at the top right. */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 id="board-title" className="text-lg font-bold">
+            보드
+          </h2>
+          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+            {isHost
+              ? "게임 시작 전에 칸 종류와 이름을 바꿀 수 있습니다."
+              : "방장이 게임 시작 전에 칸을 바꿀 수 있습니다."}
+          </p>
+        </div>
         {isHost && (
           <button
             type="button"
@@ -101,13 +109,13 @@ export function BoardPanel({
             }}
             disabled={!connected}
             aria-pressed={editing}
-            className={editing ? smallPrimaryButton : smallButton}
+            className={`shrink-0 ${smallPrimaryButton}`}
           >
             {editing ? "완료" : "✏️ 보드 편집"}
           </button>
         )}
       </div>
-      {canEdit ? (
+      {canEdit && (
         <div className="mt-3 flex flex-col gap-2 rounded-2xl bg-violet-50 dark:bg-violet-500/10 px-4 py-3 ring-2 ring-violet-200 dark:ring-violet-400/40 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm font-bold text-violet-800 dark:text-violet-200">
             보드 편집 중 · 바꿀 칸을 누르세요. 0번 출발 칸은 바꿀 수 없습니다.
@@ -121,12 +129,6 @@ export function BoardPanel({
             {resetting ? "되돌리는 중..." : "기본 보드로 되돌리기"}
           </button>
         </div>
-      ) : (
-        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          {isHost
-            ? "게임 시작 전에 칸 종류와 이름을 바꿀 수 있습니다."
-            : "방장이 게임 시작 전에 칸을 바꿀 수 있습니다."}
-        </p>
       )}
       <div className="mt-3 empty:hidden">
         <FormError message={error} />

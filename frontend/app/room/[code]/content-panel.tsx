@@ -121,6 +121,8 @@ export function ContentTabs({
   onUnauthorized: () => void;
 }) {
   const [tab, setTab] = useState<ContentKind>("questions");
+  // Presses of the header's 추가; the open tab's panel opens its add form for each one.
+  const [addRequest, setAddRequest] = useState(0);
 
   // Arrow keys / Home / End move between tabs (WAI-ARIA tabs pattern).
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
@@ -147,12 +149,30 @@ export function ContentTabs({
 
   return (
     <section aria-label="게임 콘텐츠" className={cardClass}>
-      <h2 className="mb-3 text-lg font-bold">게임 콘텐츠</h2>
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-lg font-bold">게임 콘텐츠</h2>
+          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+            게임에서 사용할 Q&amp;A, 미션, 벌칙을 관리합니다.
+          </p>
+        </div>
+        {/* Adds to the open tab (its name is in the label: 질문 추가 / 미션 추가 / 벌칙 추가). */}
+        <button
+          type="button"
+          onClick={() => setAddRequest((count) => count + 1)}
+          disabled={contents[tab] === null}
+          aria-label={TEXT[tab].add}
+          className={`shrink-0 ${smallPrimaryButton}`}
+        >
+          <span aria-hidden="true">+&nbsp;</span>추가
+        </button>
+      </div>
+      {/* The three tabs keep a readable width on wide screens instead of stretching across. */}
       <div
         role="tablist"
         aria-label="콘텐츠 종류"
         onKeyDown={handleKeyDown}
-        className="grid grid-cols-3 gap-1 rounded-2xl bg-zinc-100 dark:bg-zinc-800 p-1"
+        className="grid grid-cols-3 gap-1 rounded-2xl bg-zinc-100 dark:bg-zinc-800 p-1 sm:max-w-lg"
       >
         {CONTENT_KINDS.map((kind) => {
           const selected = kind === tab;
@@ -182,6 +202,7 @@ export function ContentTabs({
         client={client}
         onPatch={(update) => onPatch(tab, update)}
         onUnauthorized={onUnauthorized}
+        addRequest={addRequest}
       />
     </section>
   );
@@ -196,7 +217,9 @@ export type ContentPick = {
 };
 
 // The list with add / edit / delete for one kind: a tab of ContentTabs in the lobby, or on its
-// own (standalone) during the game.
+// own (standalone) during the game. In the lobby the list uses the full width (2-3 columns) and
+// the add form opens at the top from the header's 추가 (addRequest); standalone keeps one column
+// with its own add button under it.
 export function ContentPanel({
   kind,
   items,
@@ -206,6 +229,7 @@ export function ContentPanel({
   onUnauthorized,
   pick,
   standalone = false,
+  addRequest = 0,
 }: {
   kind: ContentKind;
   items: ContentItem[] | null;
@@ -215,6 +239,7 @@ export function ContentPanel({
   onUnauthorized: () => void;
   pick?: ContentPick;
   standalone?: boolean;
+  addRequest?: number;
 }) {
   const text = TEXT[kind];
   const [form, setForm] = useState<FormState>(null);
@@ -223,6 +248,16 @@ export function ContentPanel({
   const [error, setError] = useState<string | null>(null);
   // Guards against a second request before the disabled state has rendered.
   const pending = useRef(false);
+  // A new press of the header's 추가 opens the add form (an open one keeps what was typed).
+  const [seenAddRequest, setSeenAddRequest] = useState(addRequest);
+  if (addRequest !== seenAddRequest) {
+    setSeenAddRequest(addRequest);
+    if (form?.mode !== "add" && busy === null && items !== null) {
+      setForm({ mode: "add" });
+      setDraft(BLANK);
+      setError(null);
+    }
+  }
 
   function openForm(next: Exclude<FormState, null>, value: Draft) {
     setForm(next);
@@ -324,11 +359,22 @@ export function ContentPanel({
     ? {}
     : { role: "tabpanel", id: `panel-${kind}`, "aria-labelledby": `tab-${kind}`, tabIndex: 0 };
 
+  const addForm =
+    form?.mode === "add" ? (
+      <ContentForm
+        {...formProps}
+        idPrefix={`add-${kind}`}
+        submitLabel={busy?.action === "create" ? "추가 중..." : "추가"}
+        autoFocus={!standalone}
+      />
+    ) : null;
+
   return (
     <div
       {...tabProps}
       className={`flex flex-col gap-3 rounded-2xl focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-violet-200 ${standalone ? "" : "mt-4"}`}
     >
+      {!standalone && (form === null ? <FormError message={error} /> : addForm)}
       {items === null && (
         <p className="py-6 text-center text-base text-zinc-500 dark:text-zinc-400">
           {loadFailed
@@ -342,7 +388,11 @@ export function ContentPanel({
         </p>
       )}
       {items && items.length > 0 && (
-        <ul className="flex flex-col gap-2">
+        <ul
+          className={
+            standalone ? "flex flex-col gap-2" : "grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3"
+          }
+        >
           {items.map((item) =>
             form?.mode === "edit" && form.id === item.id ? (
               <li key={item.id}>
@@ -355,7 +405,8 @@ export function ContentPanel({
             ) : (
               <li
                 key={item.id}
-                className="flex flex-col gap-3 rounded-2xl bg-zinc-50 dark:bg-zinc-800/60 p-4 sm:flex-row sm:items-start sm:justify-between"
+                // Lobby cards: the text on top, its buttons at the bottom right.
+                className={`flex flex-col gap-3 rounded-2xl bg-zinc-50 dark:bg-zinc-800/60 p-4 ${standalone ? "sm:flex-row sm:items-start sm:justify-between" : ""}`}
               >
                 <div className="min-w-0 flex-1">
                   <p
@@ -374,7 +425,7 @@ export function ContentPanel({
                     </div>
                   )}
                 </div>
-                <div className="flex shrink-0 flex-wrap gap-2">
+                <div className={`flex shrink-0 flex-wrap gap-2 ${standalone ? "" : "mt-auto justify-end"}`}>
                   {pick && (
                     <button
                       type="button"
@@ -410,26 +461,21 @@ export function ContentPanel({
           )}
         </ul>
       )}
-      {form?.mode === "add" ? (
-        <ContentForm
-          {...formProps}
-          idPrefix={`add-${kind}`}
-          submitLabel={busy?.action === "create" ? "추가 중..." : "추가"}
-        />
-      ) : (
-        <>
-          {form === null && <FormError message={error} />}
-          <button
-            type="button"
-            onClick={() => openForm({ mode: "add" }, BLANK)}
-            disabled={busy !== null || items === null}
-            className={secondaryButton}
-          >
-            <span aria-hidden="true">+&nbsp;</span>
-            {text.add}
-          </button>
-        </>
-      )}
+      {standalone &&
+        (addForm ?? (
+          <>
+            {form === null && <FormError message={error} />}
+            <button
+              type="button"
+              onClick={() => openForm({ mode: "add" }, BLANK)}
+              disabled={busy !== null || items === null}
+              className={secondaryButton}
+            >
+              <span aria-hidden="true">+&nbsp;</span>
+              {text.add}
+            </button>
+          </>
+        ))}
     </div>
   );
 }
@@ -441,6 +487,7 @@ function ContentForm({
   disabled,
   idPrefix,
   submitLabel,
+  autoFocus = false,
   onChange,
   onSubmit,
   onCancel,
@@ -451,6 +498,7 @@ function ContentForm({
   disabled: boolean;
   idPrefix: string;
   submitLabel: string;
+  autoFocus?: boolean;
   onChange: (draft: Draft) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onCancel: () => void;
@@ -480,6 +528,7 @@ function ContentForm({
           value={draft.content}
           onChange={(event) => onChange({ ...draft, content: event.target.value })}
           rows={3}
+          autoFocus={autoFocus}
           aria-describedby={`${idPrefix}-count`}
           className="w-full resize-y rounded-2xl border-2 border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 px-4 py-3 text-base text-zinc-900 dark:text-zinc-100 focus:border-violet-500 focus:outline-none focus-visible:ring-4 focus-visible:ring-violet-100 dark:focus-visible:ring-violet-500/30"
         />

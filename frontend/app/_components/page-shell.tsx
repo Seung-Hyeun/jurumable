@@ -57,8 +57,9 @@ export const smallDangerButton = `${smallBase} bg-white dark:bg-zinc-800 text-ro
 const WIDTH = {
   narrow: "max-w-md",
   wide: "max-w-2xl",
-  // One column on phones, two columns (players | contents) on desktop.
-  split: "max-w-2xl lg:max-w-5xl",
+  // The lobby: one column on phones and tablets; on desktop room + players | board, with the
+  // contents under both at full width.
+  split: "max-w-2xl lg:max-w-[88rem]",
   // The game screen: as split, plus a game history column left of the board on wide screens.
   game: "max-w-2xl lg:max-w-5xl xl:max-w-[88rem]",
 };
