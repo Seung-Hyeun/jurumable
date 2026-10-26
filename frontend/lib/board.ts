@@ -1,3 +1,5 @@
+import type { BoardTile } from "./api";
+
 // The 30-tile board, in the same order as backend/src/rooms/board.ts. The backend decides
 // every move; this file only describes how to draw the board.
 export type TileType =
@@ -46,6 +48,24 @@ export const BOARD_TILES: readonly TileType[] = [
 ];
 
 export const BOARD_SIZE = BOARD_TILES.length; // 30, like the backend
+
+// The default board as tiles: what a room the host has not changed plays with.
+export const DEFAULT_BOARD: BoardTile[] = BOARD_TILES.map((type, index) => ({ index, type, label: null }));
+
+// What the host may choose for tiles 1..29 before the game (tile 0 stays START), and how long a
+// tile name may be: the same rules the backend checks.
+export const EDITABLE_TILE_TYPES: TileType[] = [
+  "MISSION",
+  "QA",
+  "PENALTY",
+  "TARGET_DRINK",
+  "ONE_DRINK",
+  "TWO_DRINKS",
+  "ADD_DRINK",
+  "DRINK_ACCUMULATED",
+  "REST",
+];
+export const TILE_LABEL_MAX_LENGTH = 10;
 
 export const TILE_LABEL: Record<TileType, string> = {
   START: "출발",
@@ -104,6 +124,11 @@ export const TILE_ICON: Record<TileType, string> = {
 
 // 1-based grid cell of tile `index` on the border of a cols × rows grid, clockwise from the
 // top-left corner. A border has 2 × (cols + rows) − 4 cells: 6 × 11 and 9 × 8 both hold 30.
+// A tile's name: the host's name for it, or the type's own.
+export function tileName(tile: { type: TileType; label: string | null }) {
+  return tile.label ?? TILE_LABEL[tile.type];
+}
+
 export function perimeterCell(index: number, cols: number, rows: number) {
   const right = cols + rows - 1; // first index past the right column
   const bottom = right + cols - 1; // first index past the bottom row

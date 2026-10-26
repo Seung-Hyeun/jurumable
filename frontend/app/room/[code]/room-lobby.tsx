@@ -14,6 +14,7 @@ import {
   type RoomStatus,
   type StartAck,
 } from "@/lib/api";
+import { DEFAULT_BOARD } from "@/lib/board";
 import { Badge, OnlineBadge, PlayerBadges } from "../../_components/badge";
 import {
   FormError,
@@ -22,6 +23,7 @@ import {
   primaryButton,
   smallDangerButton,
 } from "../../_components/page-shell";
+import { BoardPanel } from "./board-editor";
 import { ContentTabs, type ContentItem } from "./content-panel";
 import {
   BlockedScreen,
@@ -336,6 +338,17 @@ export default function RoomLobby({ code }: { code: string }) {
             className="mt-2 items-center"
           />
         </section>
+      </div>
+
+      {/* The board this room will play with; the host can change tiles before the start.
+          An older backend (for a moment during a deploy) sends no board: the default one. */}
+      <div className="mt-4">
+        <BoardPanel
+          board={state.board ?? DEFAULT_BOARD}
+          isHost={isHost}
+          socketRef={socketRef}
+          connected={connection === "connected"}
+        />
       </div>
       {/* Same fixed message area as the game screen; it never takes a tap. */}
       <div

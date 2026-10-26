@@ -58,6 +58,67 @@ export function getTile(position: number): { index: number; type: TileType } {
   return { index: position, type: BOARD_TILES[position] };
 }
 
+// The host can change tiles 1..29 of their room before the game starts: the type (any of these,
+// START excluded) and, optionally, the name shown on the tile (otherwise the type's own name).
+// Tile 0 always stays START.
+export const EDITABLE_TILE_TYPES: readonly TileType[] = Object.values(
+  TileType,
+).filter((type) => type !== TileType.START);
+export const TILE_LABEL_MAX_LENGTH = 10;
+
+export interface BoardTile {
+  index: number;
+  type: TileType;
+  // The host's name for the tile; null shows the type's own name.
+  label: string | null;
+}
+
+export const isEditableTileIndex = (index: unknown): index is number =>
+  Number.isInteger(index) &&
+  (index as number) >= 1 &&
+  (index as number) < BOARD_SIZE;
+
+// A room's changes as stored on Room.boardTiles: { "<index>": { type, label } }. Anything that
+// does not fit (a wrong index, type or label) is skipped, so that tile is the default one.
+function readOverrides(value: unknown) {
+  const tiles = new Map<number, BoardTile>();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return tiles;
+  }
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    const index = Number(key);
+    const { type, label } = (entry ?? {}) as {
+      type?: unknown;
+      label?: unknown;
+    };
+    if (
+      isEditableTileIndex(index) &&
+      EDITABLE_TILE_TYPES.includes(type as TileType) &&
+      (label === null ||
+        (typeof label === 'string' &&
+          label.length > 0 &&
+          Array.from(label).length <= TILE_LABEL_MAX_LENGTH))
+    ) {
+      tiles.set(index, { index, type: type as TileType, label });
+    }
+  }
+  return tiles;
+}
+
+// The room's 30 tiles: the default board with the room's changes on top. Every game rule reads
+// its tiles from here, so a changed tile also plays as its new type.
+export function resolveBoard(overrides: unknown): BoardTile[] {
+  const changed = readOverrides(overrides);
+  return BOARD_TILES.map(
+    (type, index) => changed.get(index) ?? { index, type, label: null },
+  );
+}
+
+export function getRoomTile(overrides: unknown, position: number): BoardTile {
+  getTile(position); // same range check
+  return resolveBoard(overrides)[position];
+}
+
 export type TileEffect =
   | { type: 'START' }
   | { type: 'REST' }

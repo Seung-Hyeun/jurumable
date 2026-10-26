@@ -2,6 +2,13 @@
 // The base URL comes from .env.local and is inlined into the client bundle at build time.
 import type { TileType } from "./board";
 
+// One tile of a room's board; label is the host's name for it (null: the type's own name).
+export interface BoardTile {
+  index: number;
+  type: TileType;
+  label: string | null;
+}
+
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
 export type RoomStatus = "WAITING" | "PLAYING" | "ENDED";
@@ -109,6 +116,9 @@ export interface RoomStatePayload {
   // The latest missions / penalties of this game, newest first (the backend keeps them in the
   // DB, so a refresh shows the same list).
   history: HistoryEntry[];
+  // The room's 30 tiles (the default board with the host's changes); the same board the server
+  // plays with.
+  board: BoardTile[];
   // The server clock when this state was sent, for every countdown.
   serverTime: string;
 }
@@ -138,7 +148,7 @@ export interface DiceRolled {
   dice: number;
   fromPosition: number;
   toPosition: number;
-  tile: { index: number; type: TileType };
+  tile: BoardTile;
 }
 
 export type TileEffect =
@@ -151,15 +161,18 @@ export type TileEffect =
 export interface TileResolved {
   playerId: string;
   displayName: string;
-  tile: { index: number; type: TileType };
+  tile: BoardTile;
   effect: TileEffect;
 }
 
 // `game:qa-selected`: the question the current player chose (random: the server picked it;
 // direct: none from the list, it is asked live).
+// playerId / displayName: who answers; chooser: who settled the question (another player, or the
+// answerer when nobody else was online).
 export interface QaSelected {
   playerId: string;
   displayName: string;
+  chooser: PlayerName;
   question: { id: string | null; content: string };
   random: boolean;
   direct: boolean;
@@ -251,7 +264,7 @@ export type RollAck =
       dice: number;
       fromPosition: number;
       toPosition: number;
-      tile: { index: number; type: TileType };
+      tile: BoardTile;
       autoResolved: boolean;
     }
   | { ok: false; code: string; message: string };

@@ -15,7 +15,17 @@ import type {
   Room,
 } from '../generated/prisma/client.js';
 import { PrismaService } from '../prisma.service.js';
-import { TileType, getTile, movePosition, resolveAutoTile } from './board.js';
+import {
+  BOARD_TILES,
+  EDITABLE_TILE_TYPES,
+  TILE_LABEL_MAX_LENGTH,
+  TileType,
+  getRoomTile,
+  isEditableTileIndex,
+  movePosition,
+  resolveAutoTile,
+  resolveBoard,
+} from './board.js';
 import {
   DEFAULT_MISSIONS,
   DEFAULT_PENALTIES,
@@ -28,7 +38,11 @@ import { SaveMissionDto } from './dto/save-mission.dto.js';
 import { SavePenaltyDto } from './dto/save-penalty.dto.js';
 import { SaveQuestionDto } from './dto/save-question.dto.js';
 import { createReconnectToken, hashReconnectToken } from './reconnect-token.js';
-import { ROOM_CODE_CHARS, ROOM_CODE_LENGTH } from './user-input.js';
+import {
+  ROOM_CODE_CHARS,
+  ROOM_CODE_LENGTH,
+  normalizeNickname,
+} from './user-input.js';
 
 // Ten collisions in a row in a 32^6 code space means something is wrong, not bad luck.
 const ROOM_CODE_MAX_ATTEMPTS = 10;
@@ -102,6 +116,12 @@ function isRoomCodeConflict(error: unknown) {
     (constraint?.index === 'Room_code_key' ||
       constraint?.fields?.includes('code') === true)
   );
+}
+
+// One element of a non-empty list, every one with the same chance: a crypto random index in
+// 0..length-1. The Q&A random question, the mission and the penalty are all picked with this.
+export function pickRandom<T>(items: readonly T[]): T {
+  return items[randomInt(items.length)];
 }
 
 // Fisher-Yates with a crypto RNG so every order is equally likely.
@@ -290,6 +310,7 @@ export class RoomsService {
         activeMissionVoteRoundId: true,
         activePenaltySource: true,
         activeEndVoteRoundId: true,
+        boardTiles: true,
         players: {
           select: {
             id: true,
@@ -319,8 +340,11 @@ export class RoomsService {
       activeMissionVoteRoundId,
       activePenaltySource,
       activeEndVoteRoundId,
+      boardTiles,
       ...roomInfo
     } = room;
+    // The tiles this room plays with (the default board plus the host's changes).
+    const board = resolveBoard(boardTiles);
     const current = players.find(
       (player) => player.turnOrder === roomInfo.currentTurnOrder,
     );
@@ -379,19 +403,20 @@ export class RoomsService {
     const targetEvent =
       roomInfo.turnPhase === 'RESOLVING_TILE' &&
       current &&
-      getTile(current.position).type === TileType.TARGET_DRINK
+      board[current.position].type === TileType.TARGET_DRINK
         ? {
             type: 'TARGET_DRINK' as const,
             playerId: current.id,
             displayName: current.displayName,
           }
         : null;
-    // A QA tile waits for the current player to pick a question (or let the server pick one at
-    // random); like TARGET_DRINK, standing on the tile with no question yet is the signal.
+    // A QA tile waits for another player to choose the question for the current player (or let
+    // the server pick one at random); like TARGET_DRINK, standing on the tile with no question
+    // yet is the signal.
     const qaSelectingEvent =
       roomInfo.turnPhase === 'RESOLVING_TILE' &&
       current &&
-      getTile(current.position).type === TileType.QA &&
+      board[current.position].type === TileType.QA &&
       activeQuestionContent === null
         ? {
             type: 'QA_SELECTING' as const,
@@ -452,6 +477,7 @@ export class RoomsService {
       activeEvent,
       endVote,
       history,
+      board,
       serverTime: new Date().toISOString(),
     };
   }
@@ -822,6 +848,100 @@ export class RoomsService {
     };
   }
 
+  // The host changes one tile of the room's board before the game starts: tiles 1..29 (START
+  // stays), a type from EDITABLE_TILE_TYPES, and a name of up to TILE_LABEL_MAX_LENGTH
+  // characters (empty: the type's own name). A tile set back to its default type with no name is
+  // simply not stored, so boardTiles only ever holds real changes.
+  async updateBoardTile(
+    roomId: string,
+    playerId: string,
+    tile: { index: unknown; type: unknown; label: unknown },
+  ) {
+    const label = normalizeNickname(tile.label ?? '');
+    if (
+      !isEditableTileIndex(tile.index) ||
+      !EDITABLE_TILE_TYPES.includes(tile.type as TileType) ||
+      typeof label !== 'string' ||
+      /\p{Cc}/u.test(label) ||
+      Array.from(label).length > TILE_LABEL_MAX_LENGTH
+    ) {
+      return { ok: false as const, code: 'INVALID_TILE' as const };
+    }
+    const index = tile.index;
+    const type = tile.type as TileType;
+    return this.prisma.$transaction(async (tx) => {
+      const room = await this.lockBoardEdit(tx, roomId, playerId);
+      if (room.error) {
+        return { ok: false as const, code: room.error };
+      }
+      const board = resolveBoard(room.boardTiles);
+      board[index] = { index, type, label: label || null };
+      const changed = board.filter(
+        (entry) =>
+          entry.type !== BOARD_TILES[entry.index] || entry.label !== null,
+      );
+      await tx.room.update({
+        where: { id: roomId },
+        data: {
+          boardTiles:
+            changed.length > 0
+              ? Object.fromEntries(
+                  changed.map((entry) => [
+                    entry.index,
+                    { type: entry.type, label: entry.label },
+                  ]),
+                )
+              : Prisma.DbNull,
+          lastActivityAt: new Date(),
+        },
+      });
+      return { ok: true as const, tile: board[index] };
+    });
+  }
+
+  // The host puts the default board back (WAITING only, like every board change).
+  async resetBoard(roomId: string, playerId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const room = await this.lockBoardEdit(tx, roomId, playerId);
+      if (room.error) {
+        return { ok: false as const, code: room.error };
+      }
+      await tx.room.update({
+        where: { id: roomId },
+        data: { boardTiles: Prisma.DbNull, lastActivityAt: new Date() },
+      });
+      return { ok: true as const };
+    });
+  }
+
+  // Board changes: the room row is locked, the requester must be the room's host right now (so a
+  // new host after a migration can edit, the old one cannot) and the game must not have started.
+  private async lockBoardEdit(
+    tx: Prisma.TransactionClient,
+    roomId: string,
+    playerId: string,
+  ) {
+    await tx.$queryRaw`SELECT 1 FROM "Room" WHERE "id" = ${roomId} FOR UPDATE`;
+    const room = await tx.room.findUnique({
+      where: { id: roomId },
+      select: { status: true, boardTiles: true },
+    });
+    const player = await tx.player.findFirst({
+      where: { id: playerId, roomId },
+      select: { isHost: true },
+    });
+    if (!room || !player) {
+      return { error: 'PLAYER_NOT_FOUND' as const };
+    }
+    if (!player.isHost) {
+      return { error: 'FORBIDDEN' as const };
+    }
+    if (room.status !== 'WAITING') {
+      return { error: 'BOARD_LOCKED' as const };
+    }
+    return { error: null, boardTiles: room.boardTiles };
+  }
+
   async startGame(roomId: string) {
     return this.prisma.$transaction(async (tx) => {
       // Lock the room row so a concurrent start or join cannot interleave.
@@ -872,7 +992,12 @@ export class RoomsService {
       }
       const room = await tx.room.findUnique({
         where: { id: roomId },
-        select: { status: true, currentTurnOrder: true, turnPhase: true },
+        select: {
+          status: true,
+          currentTurnOrder: true,
+          turnPhase: true,
+          boardTiles: true,
+        },
       });
       if (room?.status !== 'PLAYING') {
         return { ok: false as const, code: 'GAME_NOT_PLAYING' as const };
@@ -899,7 +1024,8 @@ export class RoomsService {
       }
 
       const toPosition = movePosition(player.position, dice);
-      const tile = getTile(toPosition);
+      // The room's own tile: a tile the host changed plays as its new type.
+      const tile = getRoomTile(room.boardTiles, toPosition);
       const auto = resolveAutoTile(tile.type, player.accumulatedDrinks);
       await tx.player.update({
         where: { id: player.id },
@@ -910,7 +1036,7 @@ export class RoomsService {
       });
 
       // A QA tile only opens the question selection here (also with no questions registered:
-      // a player or a viewer can still ask one live); the current player settles it in
+      // a player or a viewer can still ask one live); another player settles it in
       // selectQuestion.
       const qaReady = tile.type === TileType.QA;
       let mission: {
@@ -925,7 +1051,7 @@ export class RoomsService {
           orderBy: { createdAt: 'asc' },
         });
         if (missions.length > 0) {
-          mission = missions[randomInt(missions.length)];
+          mission = pickRandom(missions);
           // In the same transaction as the pick: one record per assigned mission.
           await tx.gameHistory.create({
             data: {
@@ -1340,8 +1466,7 @@ export class RoomsService {
         select: PENALTY_FIELDS,
         orderBy: { createdAt: 'asc' },
       });
-      const picked =
-        penalties.length > 0 ? penalties[randomInt(penalties.length)] : null;
+      const picked = penalties.length > 0 ? pickRandom(penalties) : null;
       let penalty = null;
       if (picked) {
         // A timed penalty starts now and runs alongside the game: the turn moves on below,
@@ -1682,16 +1807,19 @@ export class RoomsService {
     });
   }
 
-  // The current player settles the Q&A question: `questionId` picks one of the room's
-  // questions, null lets the server pick one at random from the current list, and `direct`
-  // skips the list because a player or a viewer asks the question themselves (no Question row:
-  // activeQuestionId stays null). The room lock and the "no question yet" check make it happen
-  // once, whichever request comes first.
+  // Settles the Q&A question for the current player, who is the one answering. Another player
+  // decides it: `questionId` picks one of the room's questions, null draws one at random from the
+  // current list, and `direct` means a player or a viewer asks it live (no Question row:
+  // activeQuestionId stays null). The answerer cannot choose their own question, unless nobody
+  // else is online (then the game would wait forever). Presence lives in memory, so the gateway
+  // passes `isOnline`. The room lock and the "no question yet" check make it happen once,
+  // whichever request comes first.
   async selectQuestion(
     roomId: string,
     playerId: string,
     questionId: string | null,
-    direct = false,
+    direct: boolean,
+    isOnline: (playerId: string) => boolean,
   ) {
     return this.prisma.$transaction(async (tx) => {
       if (await this.lockAndCheckPaused(tx, roomId)) {
@@ -1704,13 +1832,14 @@ export class RoomsService {
           currentTurnOrder: true,
           turnPhase: true,
           activeQuestionContent: true,
+          boardTiles: true,
         },
       });
       if (room?.status !== 'PLAYING') {
         return { ok: false as const, code: 'GAME_NOT_PLAYING' as const };
       }
-      const player = await tx.player.findFirst({
-        where: { id: playerId, roomId },
+      const players = await tx.player.findMany({
+        where: { roomId },
         select: {
           id: true,
           displayName: true,
@@ -1718,18 +1847,30 @@ export class RoomsService {
           position: true,
         },
       });
-      if (
-        player?.turnOrder == null ||
-        player.turnOrder !== room.currentTurnOrder
-      ) {
-        return { ok: false as const, code: 'NOT_YOUR_TURN' as const };
+      const chooser = players.find((player) => player.id === playerId);
+      if (!chooser) {
+        return { ok: false as const, code: 'PLAYER_NOT_FOUND' as const };
       }
+      const answerer = players.find(
+        (player) =>
+          player.turnOrder !== null &&
+          player.turnOrder === room.currentTurnOrder,
+      );
       if (
+        !answerer ||
         room.turnPhase !== 'RESOLVING_TILE' ||
-        getTile(player.position).type !== TileType.QA ||
+        getRoomTile(room.boardTiles, answerer.position).type !== TileType.QA ||
         room.activeQuestionContent !== null
       ) {
         return { ok: false as const, code: 'QA_NOT_SELECTING' as const };
+      }
+      if (
+        chooser.id === answerer.id &&
+        players.some(
+          (player) => player.id !== answerer.id && isOnline(player.id),
+        )
+      ) {
+        return { ok: false as const, code: 'ANSWERER_CANNOT_CHOOSE' as const };
       }
       let question: { id: string | null; content: string } | null;
       if (direct) {
@@ -1741,10 +1882,10 @@ export class RoomsService {
           orderBy: { createdAt: 'asc' },
         });
         if (questions.length === 0) {
-          // Nothing to draw from; the choice stays open (직접 질문 is still possible).
+          // Nothing to draw from; the choice stays open (a live question is still possible).
           return { ok: false as const, code: 'NO_QUESTIONS' as const };
         }
-        question = questions[randomInt(questions.length)];
+        question = pickRandom(questions);
       } else {
         question = await tx.question.findFirst({
           where: { id: questionId, roomId },
@@ -1765,8 +1906,9 @@ export class RoomsService {
       });
       return {
         ok: true as const,
-        playerId: player.id,
-        displayName: player.displayName,
+        playerId: answerer.id,
+        displayName: answerer.displayName,
+        chooser: { id: chooser.id, displayName: chooser.displayName },
         question,
         random: !direct && questionId === null,
         direct,
@@ -1887,7 +2029,12 @@ export class RoomsService {
     }
     const room = await tx.room.findUnique({
       where: { id: roomId },
-      select: { status: true, currentTurnOrder: true, turnPhase: true },
+      select: {
+        status: true,
+        currentTurnOrder: true,
+        turnPhase: true,
+        boardTiles: true,
+      },
     });
     if (
       room?.status !== 'PLAYING' ||
@@ -1904,7 +2051,11 @@ export class RoomsService {
     const current = players.find(
       (player) => player.turnOrder === room.currentTurnOrder,
     );
-    if (!current || getTile(current.position).type !== TileType.TARGET_DRINK) {
+    if (
+      !current ||
+      getRoomTile(room.boardTiles, current.position).type !==
+        TileType.TARGET_DRINK
+    ) {
       return { error: 'TARGET_SELECTION_NOT_ACTIVE' as const };
     }
     if (current.id !== playerId) {

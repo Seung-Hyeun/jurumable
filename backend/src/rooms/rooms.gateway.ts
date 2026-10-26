@@ -105,10 +105,20 @@ type QaSelectResult =
     }
   | AckError;
 
+const BOARD_ERRORS = {
+  PLAYER_NOT_FOUND: 'Player not found',
+  FORBIDDEN: 'Only the host can change the board',
+  BOARD_LOCKED: 'The board cannot be changed once the game has started',
+  INVALID_TILE:
+    'Tiles 1-29 only, a supported type and a name of up to 10 characters',
+};
+
 const QA_SELECT_ERRORS = {
   GAME_NOT_PLAYING: 'The game is not in progress',
-  NOT_YOUR_TURN: 'It is not your turn',
+  PLAYER_NOT_FOUND: 'Player not found',
   QA_NOT_SELECTING: 'No Q&A question is being chosen',
+  ANSWERER_CANNOT_CHOOSE:
+    'The answering player cannot choose their own question while others are online',
   QUESTION_NOT_FOUND: 'Question not found',
   NO_QUESTIONS: 'No questions are registered to draw from',
   GAME_PAUSED,
@@ -373,6 +383,59 @@ export class RoomsGateway
     }
   }
 
+  // The host changes one tile of the room's board (WAITING only); everyone gets the new board in
+  // room:state. The service checks host, status and the tile values.
+  @SubscribeMessage('board:update-tile')
+  async handleBoardUpdate(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() body: unknown,
+  ): Promise<{ ok: true } | AckError> {
+    const { playerId, roomId, roomCode } = socket.data as SocketData;
+    const { index, type, label } = (body ?? {}) as Record<string, unknown>;
+    if (
+      typeof index !== 'number' ||
+      typeof type !== 'string' ||
+      (label !== undefined && label !== null && typeof label !== 'string') ||
+      (typeof label === 'string' && label.length > 100)
+    ) {
+      return ackError('BAD_REQUEST', 'index, type and label are required');
+    }
+    try {
+      const result = await this.roomsService.updateBoardTile(roomId, playerId, {
+        index,
+        type,
+        label,
+      });
+      if (!result.ok) {
+        return ackError(result.code, BOARD_ERRORS[result.code]);
+      }
+      await this.broadcastRoomState(roomCode);
+      return { ok: true };
+    } catch (error) {
+      this.logger.error('Failed to update a board tile', errorTrace(error));
+      return ackError('INTERNAL_ERROR', 'Could not update the tile');
+    }
+  }
+
+  // The host puts the default board back (WAITING only).
+  @SubscribeMessage('board:reset')
+  async handleBoardReset(
+    @ConnectedSocket() socket: Socket,
+  ): Promise<{ ok: true } | AckError> {
+    const { playerId, roomId, roomCode } = socket.data as SocketData;
+    try {
+      const result = await this.roomsService.resetBoard(roomId, playerId);
+      if (!result.ok) {
+        return ackError(result.code, BOARD_ERRORS[result.code]);
+      }
+      await this.broadcastRoomState(roomCode);
+      return { ok: true };
+    } catch (error) {
+      this.logger.error('Failed to reset the board', errorTrace(error));
+      return ackError('INTERNAL_ERROR', 'Could not reset the board');
+    }
+  }
+
   // Leaving for good (unlike a disconnect): the player of this socket only, never one named in
   // the payload. Same removal as a kick; a leaving host hands the role on at once, no grace period.
   @SubscribeMessage('player:leave')
@@ -561,7 +624,8 @@ export class RoomsGateway
     }
   }
 
-  // The current player picks one of the room's questions for their Q&A.
+  // Another player picks one of the room's questions for the current player's Q&A (the answerer
+  // only when nobody else is online; the service checks).
   @SubscribeMessage('game:qa-select')
   handleQaSelect(
     @ConnectedSocket() socket: Socket,
@@ -580,13 +644,13 @@ export class RoomsGateway
     return this.selectQuestion(socket, questionId);
   }
 
-  // The current player lets the server pick the Q&A question at random.
+  // The fallback: the server picks the Q&A question at random (same rule on who may ask).
   @SubscribeMessage('game:qa-random')
   handleQaRandom(@ConnectedSocket() socket: Socket): Promise<QaSelectResult> {
     return this.selectQuestion(socket, null);
   }
 
-  // 직접 질문할게요: the current player skips the list; a player or a viewer asks the question.
+  // 시청자 질문 받기: no question from the list; a player or a viewer asks it live (same rule).
   @SubscribeMessage('game:qa-direct')
   handleQaDirect(@ConnectedSocket() socket: Socket): Promise<QaSelectResult> {
     return this.selectQuestion(socket, null, true);
@@ -604,17 +668,17 @@ export class RoomsGateway
         playerId,
         questionId,
         direct,
+        this.isOnline,
       );
       if (!result.ok) {
         return ackError(result.code, QA_SELECT_ERRORS[result.code]);
       }
       const broadcast = this.server.to(roomChannel(roomCode));
-      const who = {
+      // playerId / displayName: who answers; chooser: who settled the question.
+      broadcast.emit('game:qa-selected', {
         playerId: result.playerId,
         displayName: result.displayName,
-      };
-      broadcast.emit('game:qa-selected', {
-        ...who,
+        chooser: result.chooser,
         question: result.question,
         random: result.random,
         direct: result.direct,
@@ -1172,6 +1236,7 @@ export class RoomsGateway
             : activeEvent,
         endVote: state.endVote,
         history: state.history,
+        board: state.board,
         serverTime: state.serverTime,
       });
     } catch (error) {

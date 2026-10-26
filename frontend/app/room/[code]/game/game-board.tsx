@@ -1,17 +1,18 @@
 import type { CSSProperties, ReactNode } from "react";
-import type { RoomStatePlayer } from "@/lib/api";
+import type { BoardTile, RoomStatePlayer } from "@/lib/api";
 import {
   BOARD_TILES,
+  DEFAULT_BOARD,
   TILE_ICON,
-  TILE_LABEL,
   TILE_SHORT,
   TILE_TONE,
   perimeterCell,
+  tileName,
 } from "@/lib/board";
 
 // The 30 tiles run clockwise around the border of a grid: 6 × 11 on phones (tall and
 // narrow), 9 × 8 from sm up. Each tile carries both cells as CSS variables.
-const CELLS = BOARD_TILES.map((type, index) => {
+const CELLS = BOARD_TILES.map((_, index) => {
   const phone = perimeterCell(index, 6, 11);
   const wide = perimeterCell(index, 9, 8);
   const style = {
@@ -20,7 +21,7 @@ const CELLS = BOARD_TILES.map((type, index) => {
     "--wide-row": wide.row,
     "--wide-col": wide.col,
   } as CSSProperties;
-  return { index, type, style };
+  return { index, style };
 });
 
 // One color per turn order; the number on the token is what identifies it. Your own token is
@@ -94,41 +95,59 @@ export function Die({ value, rolling = false }: { value: number; rolling?: boole
 }
 
 // Tiles are decoration for sighted players; the same facts are in the player list as text.
-// arrival: the tile a token has just reached at the end of a roll, briefly marked.
+// tiles: the room's board (the host may have changed some); arrival: the tile a token has just
+// reached at the end of a roll, briefly marked. onEdit: the host's board editing (lobby): tiles
+// 1..29 become buttons that open that tile's editor; tile 0 (START) stays as it is.
 export function GameBoard({
   players,
   myId,
   currentId,
+  tiles = DEFAULT_BOARD,
   arrival = null,
+  onEdit,
   children,
 }: {
   players: RoomStatePlayer[];
   myId: string;
   currentId: string | null;
+  tiles?: BoardTile[];
   arrival?: number | null;
+  onEdit?: (index: number) => void;
   children: ReactNode;
 }) {
   const current = players.find((player) => player.id === currentId);
   return (
     <div className="grid grid-cols-6 grid-rows-[repeat(11,minmax(3.5rem,auto))] gap-1 rounded-3xl bg-white/70 dark:bg-zinc-900/70 p-2 shadow-sm ring-1 ring-black/5 dark:ring-white/10 sm:grid-cols-9 sm:grid-rows-[repeat(8,minmax(4.75rem,auto))] sm:gap-1.5 sm:p-3">
-      {CELLS.map(({ index, type, style }) => {
+      {CELLS.map(({ index, style }) => {
+        const tile = tiles[index] ?? DEFAULT_BOARD[index];
+        const type = tile.type;
+        const name = tileName(tile);
         const here = players.filter((player) => player.position === index);
+        const editable = onEdit !== undefined && index > 0;
+        const Cell = editable ? "button" : "div";
         return (
-          <div
+          <Cell
             key={index}
             data-tile={index}
-            title={`${index} · ${TILE_LABEL[type]}`}
-            aria-hidden="true"
+            title={`${index} · ${name}`}
+            {...(editable
+              ? {
+                  type: "button" as const,
+                  onClick: () => onEdit(index),
+                  "aria-label": `${index}번 칸 수정: ${name}`,
+                }
+              : { "aria-hidden": true })}
             style={style}
-            className={`flex min-w-0 flex-col gap-0.5 rounded-lg p-1 col-(--phone-col) row-(--phone-row) sm:col-(--wide-col) sm:row-(--wide-row) sm:p-1.5 ${TILE_TONE[type]} ${arrival === index ? "tile-arrival ring-4 ring-amber-400" : current?.position === index ? "ring-2 ring-violet-600 dark:ring-violet-400" : "dark:ring-1 dark:ring-white/10"}`}
+            className={`flex min-w-0 flex-col gap-0.5 rounded-lg p-1 text-left col-(--phone-col) row-(--phone-row) sm:col-(--wide-col) sm:row-(--wide-row) sm:p-1.5 ${TILE_TONE[type]} ${arrival === index ? "tile-arrival ring-4 ring-amber-400" : current?.position === index ? "ring-2 ring-violet-600 dark:ring-violet-400" : "dark:ring-1 dark:ring-white/10"} ${editable ? "cursor-pointer outline-2 outline-dashed outline-violet-400 hover:brightness-95 focus-visible:outline-solid focus-visible:outline-violet-600" : ""}`}
           >
             <span className="flex items-center justify-between gap-0.5 text-[10px] leading-none font-bold text-zinc-600 dark:text-zinc-300 tabular-nums sm:text-xs">
               {index}
               <span className="text-xs leading-none sm:text-sm">{TILE_ICON[type]}</span>
             </span>
             <span className="text-[11px] leading-tight font-bold text-zinc-800 dark:text-zinc-200 sm:text-xs">
-              <span className="sm:hidden">{TILE_SHORT[type]}</span>
-              <span className="hidden sm:inline">{TILE_LABEL[type]}</span>
+              {/* A host's own name is shown as it is; otherwise the short name on phones. */}
+              <span className="wrap-anywhere sm:hidden">{tile.label ?? TILE_SHORT[type]}</span>
+              <span className="hidden wrap-anywhere sm:inline">{name}</span>
             </span>
             {here.length > 0 && (
               // Several players on one tile wrap side by side instead of covering each other.
@@ -143,7 +162,7 @@ export function GameBoard({
                 ))}
               </span>
             )}
-          </div>
+          </Cell>
         );
       })}
       <div className="col-[2/-2] row-[2/-2] flex min-w-0 flex-col">

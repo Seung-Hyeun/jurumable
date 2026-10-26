@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { HistoryEntry, HistoryStatus } from "@/lib/api";
-import { TILE_LABEL, type TileType } from "@/lib/board";
+import type { BoardTile, HistoryEntry, HistoryStatus } from "@/lib/api";
+import { tileName } from "@/lib/board";
 import { Badge } from "../../../_components/badge";
 import { cardClass } from "../../../_components/page-shell";
 import { formatCountdown } from "./mission-panel";
@@ -14,7 +14,7 @@ export type RollLogEntry = {
   dice: number;
   fromPosition: number;
   toPosition: number;
-  tile: TileType;
+  tile: BoardTile;
   result?: string;
 };
 
@@ -153,7 +153,7 @@ function LogItem({ entry, isMe }: { entry: RollLogEntry; isMe: boolean }) {
       </div>
       <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400 tabular-nums">
         {entry.fromPosition} → {entry.toPosition} · 도착:{" "}
-        <span className="font-bold text-zinc-900 dark:text-zinc-100">{TILE_LABEL[entry.tile]}</span>
+        <span className="font-bold text-zinc-900 dark:text-zinc-100">{tileName(entry.tile)}</span>
       </p>
       {entry.result && <p className="mt-1 text-sm font-bold text-rose-700 dark:text-rose-300">{entry.result}</p>}
     </li>

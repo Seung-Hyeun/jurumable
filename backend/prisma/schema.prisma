@@ -100,6 +100,9 @@ model Room {
   // Last player activity (join, reconnect, content edit, game action, vote, kick);
   // RoomCleanupService removes rooms left idle past the TTL for their status.
   lastActivityAt               DateTime       @default(now())
+  // The host's changes to the default board, { "<index>": { type, label } } for tiles 1..29;
+  // null / missing tiles play as the default board (see resolveBoard in rooms/board.ts).
+  boardTiles                   Json?
   players                      Player[]
   questions                    Question[]
   missions                     Mission[]

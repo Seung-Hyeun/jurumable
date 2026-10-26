@@ -24,7 +24,7 @@ import type {
   TurnPhase,
   VoteProgress,
 } from "@/lib/api";
-import { BOARD_SIZE, TILE_LABEL } from "@/lib/board";
+import { BOARD_SIZE, tileName } from "@/lib/board";
 import { formatDuration } from "@/lib/content";
 import { clearSession } from "@/lib/session";
 import { getSettings } from "@/lib/settings";
@@ -51,7 +51,7 @@ import {
 import type { ContentItem } from "../content-panel";
 import { useRoom } from "../use-room";
 import { EndVoteOverlay, GameEnded } from "./end-vote-panel";
-import { CALLOUT, Roulette, contentSize, rouletteFrames } from "./event-ui";
+import { CALLOUT, Roulette, contentSize, rouletteFrames, type RouletteItem } from "./event-ui";
 import { Die, GameBoard, PlayerToken } from "./game-board";
 import { HistoryPanel, type RollLogEntry } from "./history-panel";
 import { MissionAction, MissionPrompt, MissionVote } from "./mission-panel";
@@ -196,11 +196,15 @@ type SpinShow = {
   kind: "penalty" | "qa";
   title: string;
   note: string;
-  result: string;
-  candidates: string[];
+  result: RouletteItem;
+  candidates: RouletteItem[];
   tick: number;
   base: RoomStatePayload | null;
 };
+
+// A roulette needs at least two different rows to flick between; with fewer known on this screen
+// (the list not loaded yet) the result is shown at once instead of "spinning" one text.
+const canSpin = (candidates: RouletteItem[]) => motionAllowed() && candidates.length >= 2;
 
 // How long each frame stays, in ms: fast, then slower, then slowest; the last one is the result,
 // held a moment. Penalty: about 3.4 s before it stops. Q&A: about 1.9 s.
@@ -296,10 +300,13 @@ export default function GameScreen({ code }: { code: string }) {
   const [show, setShow] = useState<RollShow | null>(null);
   // The penalty roulette / random Q&A question being shown (see SpinShow).
   const [spin, setSpin] = useState<SpinShow | null>(null);
-  // The current player has opened 등록된 질문에서 고르기 during a Q&A choice.
+  // A player choosing someone else's Q&A question has opened 등록된 질문 골라주기.
   const [pickerOpen, setPickerOpen] = useState(false);
-  // The question / penalty texts the roulettes flick through (kept in step with the lists).
-  const lists = useRef<{ questions: string[]; penalties: string[] }>({ questions: [], penalties: [] });
+  // The question / penalty rows the roulettes flick through (kept in step with the lists).
+  const lists = useRef<{ questions: RouletteItem[]; penalties: RouletteItem[] }>({
+    questions: [],
+    penalties: [],
+  });
   // 게임 기록: the latest rolls this screen has seen, newest first (not stored by the backend).
   const [log, setLog] = useState<RollLogEntry[]>([]);
   const rollSeq = useRef(0);
@@ -360,7 +367,7 @@ export default function GameScreen({ code }: { code: string }) {
             dice: payload.dice,
             fromPosition: payload.fromPosition,
             toPosition: payload.toPosition,
-            tile: payload.tile.type,
+            tile: payload.tile,
           },
           ...list,
         ].slice(0, 20),
@@ -392,12 +399,12 @@ export default function GameScreen({ code }: { code: string }) {
     s.on("game:qa-selected", (payload: QaSelected) => {
       setNotice(null);
       setPickerOpen(false);
-      if (payload.random && motionAllowed()) {
+      if (payload.random && canSpin(lists.current.questions)) {
         setSpin({
           kind: "qa",
           title: `${payload.displayName}님의 질문`,
           note: "랜덤 질문",
-          result: payload.question.content,
+          result: payload.question,
           candidates: lists.current.questions,
           tick: 0,
           base: latest.current,
@@ -466,13 +473,14 @@ export default function GameScreen({ code }: { code: string }) {
           durationSeconds: penalty.durationSeconds,
         },
       });
+      // The server's pick (by id) is where the roulette stops; nothing here chooses.
       setSpin(
-        motionAllowed()
+        canSpin(lists.current.penalties)
           ? {
               kind: "penalty",
               title: `${displayName ?? ""}님의 벌칙`,
               note: source === "MISSION_FAILURE" ? "미션 실패 벌칙" : "벌칙 칸 결과",
-              result: penalty.content,
+              result: { id: penalty.id, content: penalty.content },
               candidates: lists.current.penalties,
               tick: 0,
               base: latest.current,
@@ -553,8 +561,8 @@ export default function GameScreen({ code }: { code: string }) {
   // The lists the roulettes flick through, read when a result comes in.
   useEffect(() => {
     lists.current = {
-      questions: questions?.map((question) => question.content) ?? [],
-      penalties: penalties.map((penalty) => penalty.content),
+      questions: questions?.map(({ id, content }) => ({ id, content })) ?? [],
+      penalties: penalties.map(({ id, content }) => ({ id, content })),
     };
   }, [questions, penalties]);
 
@@ -705,6 +713,13 @@ export default function GameScreen({ code }: { code: string }) {
   const qaSelectingPerformer = qaSelecting
     ? players.find((player) => player.id === qaSelecting.playerId)
     : undefined;
+  // The answerer never chooses their own question; another player does. Only when nobody else is
+  // online may the answerer settle it themselves, so the game cannot get stuck (the server checks
+  // the same).
+  const answering = qaSelecting !== null && qaSelecting.playerId === view.playerId;
+  const answererAlone =
+    qaSelecting !== null &&
+    players.every((player) => player.id === qaSelecting.playerId || !player.isOnline);
   // The Q&A in progress, taken from room:state only; it is always the current player's.
   const qa =
     room.status === "PLAYING" &&
@@ -830,6 +845,7 @@ export default function GameScreen({ code }: { code: string }) {
             players={players}
             myId={view.playerId}
             currentId={current?.id ?? null}
+            tiles={shown.board}
             arrival={show?.phase === "arrived" ? show.roll.toPosition : null}
           >
             <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-2xl bg-white/85 dark:bg-zinc-900/85 p-3 text-center wrap-anywhere sm:p-4">
@@ -857,7 +873,7 @@ export default function GameScreen({ code }: { code: string }) {
                     {show.phase !== "rolling" && (
                       <p className="text-sm font-bold text-zinc-600 dark:text-zinc-400 tabular-nums">
                         {show.roll.fromPosition} → {show.roll.toPosition}
-                        {show.phase === "arrived" && ` · ${TILE_LABEL[show.roll.tile.type]} 도착!`}
+                        {show.phase === "arrived" && ` · ${tileName(show.roll.tile)} 도착!`}
                       </p>
                     )}
                   </div>
@@ -880,7 +896,8 @@ export default function GameScreen({ code }: { code: string }) {
               ) : qaSelecting && qaSelectingPerformer ? (
                   <QaSelectPrompt
                     performer={qaSelectingPerformer}
-                    isPerformer={qaSelecting.playerId === view.playerId}
+                    isPerformer={answering}
+                    alone={answererAlone}
                     paused={paused}
                   />
                 ) : qa && current ? (
@@ -958,7 +975,7 @@ export default function GameScreen({ code }: { code: string }) {
                               <p className="text-sm text-zinc-600 dark:text-zinc-400">
                                 도착:{" "}
                                 <span className="font-bold text-zinc-900 dark:text-zinc-100">
-                                  {TILE_LABEL[lastRoll.tile.type]}
+                                  {tileName(lastRoll.tile)}
                                 </span>
                               </p>
                             </div>
@@ -1009,12 +1026,13 @@ export default function GameScreen({ code }: { code: string }) {
                 )}
               </div>
               {show || spin ? null : qaSelecting ? (
-                // Only the current player decides.
-                qaSelecting.playerId === view.playerId && (
+                // The other players choose; the answerer only when alone online.
+                (!answering || answererAlone) && (
                   <QaChoiceButtons
                     socketRef={socketRef}
                     connected={connection === "connected"}
                     paused={paused}
+                    alone={answering}
                     hasQuestions={(questions?.length ?? 0) > 0}
                     pickerOpen={pickerOpen}
                     onTogglePicker={() => setPickerOpen((open) => !open)}
@@ -1089,7 +1107,8 @@ export default function GameScreen({ code }: { code: string }) {
               )}
             </div>
           </GameBoard>
-          {qaSelecting && qaSelecting.playerId === view.playerId && pickerOpen && (
+          {/* The registered questions, for the players choosing; never for the answerer. */}
+          {qaSelecting && !answering && pickerOpen && (
             <QaQuestionPicker
               questions={questions}
               loadFailed={questionsFailed}

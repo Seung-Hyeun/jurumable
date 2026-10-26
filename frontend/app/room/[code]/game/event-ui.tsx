@@ -47,14 +47,22 @@ export function EventHeader({
   );
 }
 
-// The frames of a roulette that lands on the server's result: the candidates (the room's list)
-// in order for show, the last frame always the result the server already picked and stored.
-// Nothing here chooses anything.
-export function rouletteFrames(candidates: string[], result: string, count: number) {
-  const list = candidates.length > 0 ? candidates : [result];
-  const at = Math.max(0, list.indexOf(result));
+// A roulette candidate: one row of the room's list, told apart by its id (two rows may share a
+// text).
+export type RouletteItem = { id: string | null; content: string };
+
+// The frames of a roulette that lands on the server's result: the room's list in its own order
+// for show, ending where the result sits in it; the last frame is always the result the server
+// already picked and stored. Nothing here chooses anything.
+export function rouletteFrames(candidates: RouletteItem[], result: RouletteItem, count: number) {
+  const at = candidates.findIndex((item) => item.id !== null && item.id === result.id);
+  // The result is always in the cycle, even if this screen's list is a little behind.
+  const list = at >= 0 ? candidates : [...candidates, result];
+  const end = at >= 0 ? at : list.length - 1;
   return Array.from({ length: count }, (_, i) =>
-    i === count - 1 ? result : list[(at - (count - 1 - i) + list.length * count) % list.length],
+    i === count - 1
+      ? result.content
+      : list[(end - (count - 1 - i) + list.length * count) % list.length].content,
   );
 }
 
